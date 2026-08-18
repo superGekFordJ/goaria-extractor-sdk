@@ -1,0 +1,17 @@
+.{
+    .name = .zig_minimal_pack,
+    .version = "0.1.0",
+    .fingerprint = 0x8382f519f90fae7e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .goaria_sdk = .{
+            .path = "../../sdk/zig",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "manifest.json",
+        "src",
+    },
+}

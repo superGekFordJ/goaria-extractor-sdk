@@ -1,4 +1,6 @@
 /target
+.zig-cache/
+zig-out/
 Cargo.lock
 *.pack.zip
 *.lock.json
