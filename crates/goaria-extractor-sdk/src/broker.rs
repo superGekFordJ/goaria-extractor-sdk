@@ -88,12 +88,44 @@ impl HostBroker {
         Ok(resp)
     }
 
-    /// Convenience check for whether an auth profile is currently available in the host.
-    pub fn is_auth_available(&self, auth_profile_ref: &str) -> Result<bool, ExtractorError> {
+    /// Check whether an auth profile is available for a given legacy URL.
+    pub fn is_auth_available_for_url(
+        &self,
+        auth_profile_ref: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<bool, ExtractorError> {
         let resp = self.auth_profile_status(&HostAuthProfileStatusRequest {
-            auth_profile_ref: auth_profile_ref.to_string(),
+            auth_profile_ref: auth_profile_ref.into(),
+            url: Some(url.into()),
             ..Default::default()
         })?;
         Ok(resp.ok && resp.available.unwrap_or(false))
+    }
+
+    /// Check whether an auth profile is available for an alias ref endpoint.
+    pub fn is_auth_available_for_endpoint(
+        &self,
+        auth_profile_ref: impl Into<String>,
+        broker_policy_ref: impl Into<String>,
+        endpoint_ref: impl Into<String>,
+        params: BTreeMap<String, String>,
+    ) -> Result<bool, ExtractorError> {
+        let resp = self.auth_profile_status(&HostAuthProfileStatusRequest {
+            auth_profile_ref: auth_profile_ref.into(),
+            broker_policy_ref: Some(broker_policy_ref.into()),
+            endpoint_ref: Some(endpoint_ref.into()),
+            params: if params.is_empty() { None } else { Some(params) },
+            ..Default::default()
+        })?;
+        Ok(resp.ok && resp.available.unwrap_or(false))
+    }
+
+    /// Convenience check for whether an auth profile is available for a URL.
+    pub fn is_auth_available(
+        &self,
+        auth_profile_ref: impl Into<String>,
+        url: impl Into<String>,
+    ) -> Result<bool, ExtractorError> {
+        self.is_auth_available_for_url(auth_profile_ref, url)
     }
 }

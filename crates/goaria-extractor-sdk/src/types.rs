@@ -8,7 +8,8 @@ pub struct MatchInput {
 }
 
 /// Output payload returned by goaria_match.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MatchOutput {
     pub matched: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +54,7 @@ pub struct ExtractInput {
 
 /// Output payload returned by goaria_extract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ExtractOutput {
     pub items: Vec<ExtractedItemRef>,
 }
@@ -74,6 +76,7 @@ impl ExtractOutput {
 
 /// Reference to a single extracted resource item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ExtractedItemRef {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -105,6 +108,7 @@ pub enum AuthSecretKind {
 
 /// Request payload sent to host import goaria_host.http_fetch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HostHTTPFetchRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
@@ -128,6 +132,7 @@ pub struct HostHTTPFetchRequest {
 
 /// Response payload received from host import goaria_host.http_fetch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HostHTTPFetchResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -146,6 +151,7 @@ pub struct HostHTTPFetchResponse {
 
 /// Request payload sent to host import goaria_host.auth_profile_status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HostAuthProfileStatusRequest {
     pub auth_profile_ref: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -160,6 +166,7 @@ pub struct HostAuthProfileStatusRequest {
 
 /// Response payload received from host import goaria_host.auth_profile_status.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct HostAuthProfileStatusResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

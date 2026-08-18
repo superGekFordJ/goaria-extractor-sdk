@@ -45,7 +45,7 @@ fn test_pack_json_response() {
 }
 
 // -----------------------------------------------------------------------------
-// 2. Serde Exact JSON DTO Tests
+// 2. Serde Exact JSON DTO & Forward Compatibility Tests
 // -----------------------------------------------------------------------------
 
 #[test]
@@ -76,6 +76,12 @@ fn test_match_output_serde() {
         json_str,
         r#"{"matched":true,"confidence":100,"reason":"domain matched"}"#
     );
+
+    // Forward compatibility test with empty JSON
+    let parsed_default: MatchOutput = serde_json::from_str("{}").unwrap();
+    assert!(!parsed_default.matched);
+    assert_eq!(parsed_default.confidence, None);
+    assert_eq!(parsed_default.reason, None);
 }
 
 #[test]
@@ -116,6 +122,10 @@ fn test_extract_output_serde() {
     assert!(json_str.contains(r#""mime_type":"application/octet-stream""#));
     assert!(json_str.contains(r#""auth_profile_ref":"profile-alpha""#));
     assert!(!json_str.contains("header_profile_ref"));
+
+    // Forward compatibility test with empty JSON
+    let parsed_default: ExtractOutput = serde_json::from_str("{}").unwrap();
+    assert!(parsed_default.items.is_empty());
 }
 
 #[test]
@@ -169,6 +179,13 @@ fn test_host_http_fetch_request_and_response_serde() {
     let json_resp = serde_json::to_string(&resp).unwrap();
     let deserialized_resp: HostHTTPFetchResponse = serde_json::from_str(&json_resp).unwrap();
     assert_eq!(deserialized_resp, resp);
+
+    // Forward compatibility tests
+    let parsed_req_default: HostHTTPFetchRequest = serde_json::from_str("{}").unwrap();
+    assert_eq!(parsed_req_default, HostHTTPFetchRequest::default());
+
+    let parsed_resp_default: HostHTTPFetchResponse = serde_json::from_str("{}").unwrap();
+    assert_eq!(parsed_resp_default, HostHTTPFetchResponse::default());
 }
 
 #[test]
@@ -268,6 +285,24 @@ impl Extractor for PanickingExtractor {
     }
 }
 
+struct PanickingDefaultExtractor;
+
+impl Default for PanickingDefaultExtractor {
+    fn default() -> Self {
+        panic!("deliberate panic inside Default::default()");
+    }
+}
+
+impl Extractor for PanickingDefaultExtractor {
+    fn match_url(&self, _input: MatchInput) -> Result<MatchOutput, ExtractorError> {
+        Ok(MatchOutput::matched())
+    }
+
+    fn extract(&self, _input: ExtractInput) -> Result<ExtractOutput, ExtractorError> {
+        Ok(ExtractOutput::default())
+    }
+}
+
 #[derive(Default)]
 struct ErroringExtractor;
 
@@ -342,6 +377,25 @@ fn test_dispatch_match_panicking_barrier() {
 }
 
 #[test]
+fn test_dispatch_match_panicking_default_barrier() {
+    let input = MatchInput {
+        url: "https://share.fixture.invalid/panic-default".to_string(),
+    };
+    let input_bytes = serde_json::to_vec(&input).unwrap();
+    let (ptr, len) = unsafe { copy_slice_to_guest(&input_bytes) };
+
+    let packed = unsafe { dispatch_match::<PanickingDefaultExtractor>(ptr, len) };
+    assert_ne!(packed, 0);
+
+    let (out_ptr, out_len) = unpack_result(packed as u64);
+    let buf = GuestBuffer::from_raw(out_ptr as i32, out_len as i32).unwrap();
+    let output: MatchOutput = serde_json::from_slice(buf.as_slice()).unwrap();
+    assert!(!output.matched);
+    assert!(output.reason.unwrap().contains("panicked"));
+    unsafe { free(ptr, len) };
+}
+
+#[test]
 fn test_dispatch_match_erroring_barrier() {
     let input = MatchInput {
         url: "https://share.fixture.invalid/err".to_string(),
@@ -381,6 +435,24 @@ fn test_dispatch_extract_panicking_barrier() {
     let (ptr, len) = unsafe { copy_slice_to_guest(&input_bytes) };
 
     let packed = unsafe { dispatch_extract::<PanickingExtractor>(ptr, len) };
+    assert_ne!(packed, 0);
+
+    let (out_ptr, out_len) = unpack_result(packed as u64);
+    let buf = GuestBuffer::from_raw(out_ptr as i32, out_len as i32).unwrap();
+    let output: ExtractOutput = serde_json::from_slice(buf.as_slice()).unwrap();
+    assert!(output.items.is_empty());
+    unsafe { free(ptr, len) };
+}
+
+#[test]
+fn test_dispatch_extract_panicking_default_barrier() {
+    let input = ExtractInput {
+        url: "https://share.fixture.invalid/panic-default".to_string(),
+    };
+    let input_bytes = serde_json::to_vec(&input).unwrap();
+    let (ptr, len) = unsafe { copy_slice_to_guest(&input_bytes) };
+
+    let packed = unsafe { dispatch_extract::<PanickingDefaultExtractor>(ptr, len) };
     assert_ne!(packed, 0);
 
     let (out_ptr, out_len) = unpack_result(packed as u64);

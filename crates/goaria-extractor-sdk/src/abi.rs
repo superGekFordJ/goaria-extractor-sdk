@@ -69,8 +69,8 @@ pub unsafe fn dispatch_match<E: Extractor + Default>(ptr: i32, len: i32) -> i64 
         }
     };
 
-    let extractor = E::default();
     let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let extractor = E::default();
         extractor.match_url(input)
     }));
 
@@ -113,8 +113,8 @@ pub unsafe fn dispatch_extract<E: Extractor + Default>(ptr: i32, len: i32) -> i6
         }
     };
 
-    let extractor = E::default();
     let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let extractor = E::default();
         extractor.extract(input)
     }));
 

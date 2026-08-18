@@ -131,6 +131,7 @@ pub unsafe fn copy_slice_to_guest(slice: &[u8]) -> (i32, i32) {
     }
     let raw = ptr_to_raw(ptr);
     if raw.is_null() {
+        free(ptr, len);
         return (0, 0);
     }
     std::ptr::copy_nonoverlapping(slice.as_ptr(), raw, slice.len());
