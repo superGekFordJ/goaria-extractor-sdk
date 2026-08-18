@@ -1,0 +1,23 @@
+{
+  "pack_id": "rust-fixture-pack",
+  "pack_version": "0.1.0",
+  "abi_version": 1,
+  "name": "Rust Fixture Pack",
+  "description": "Reference Rust URL extractor pack for GoAria SDK testing",
+  "authors": ["GoAria Team"],
+  "domains": [
+    "share.fixture.invalid",
+    "fixture.invalid"
+  ],
+  "capabilities": [
+    "cap.parse.wasm",
+    "cap.http.fetch"
+  ],
+  "resource_limits": {
+    "timeout_millis": 5000,
+    "max_memory_pages": 32,
+    "max_host_calls": 10,
+    "max_output_items": 100,
+    "max_output_bytes": 1048576
+  }
+}

@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/goaria-extractor-macro",
+    "crates/goaria-extractor-sdk",
+    "examples/rust_fixture_pack",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/superGekFordJ/goaria-extractor-sdk"
+authors = ["GoAria Team"]
+
+[workspace.dependencies]
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+syn = { version = "2.0", features = ["full", "extra-traits"] }
+quote = "1.0"
+proc-macro2 = "1.0"
+base64 = { version = "0.22", default-features = false, features = ["alloc"] }

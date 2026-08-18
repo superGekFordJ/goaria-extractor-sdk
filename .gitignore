@@ -1,0 +1,8 @@
+/target
+Cargo.lock
+*.pack.zip
+*.lock.json
+.DS_Store
+.idea/
+.vscode/
+*.wasm
