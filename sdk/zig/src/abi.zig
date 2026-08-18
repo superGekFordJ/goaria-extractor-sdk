@@ -53,9 +53,11 @@ pub fn alloc(len: i32) i32 {
 
 /// Deallocate contiguous bytes in guest memory.
 pub fn free(ptr: i32, len: i32) void {
-    if (ptr == 0 or len <= 0) return;
-    const byte_ptr: [*]u8 = @ptrFromInt(@as(usize, @intCast(ptr)));
-    getAllocator().free(byte_ptr[0..@intCast(len)]);
+    if (ptr <= 0 or len <= 0) return;
+    const allocator = getAllocator();
+    const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
+    const slice: []u8 = @as([*]u8, @ptrFromInt(u_ptr))[0..@as(usize, @as(u32, @bitCast(len)))];
+    allocator.free(slice);
 }
 
 /// Serialize a value to JSON in guest memory and return the packed 64-bit pointer/length.
@@ -82,9 +84,10 @@ pub const GuestBuffer = struct {
     }
 
     pub fn slice(self: GuestBuffer) []const u8 {
-        if (self.ptr == 0 or self.len <= 0) return &.{};
-        const byte_ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(self.ptr)));
-        return byte_ptr[0..@intCast(self.len)];
+        if (self.ptr <= 0 or self.len <= 0) return &.{};
+        const u_ptr: usize = @as(usize, @as(u32, @bitCast(self.ptr)));
+        const byte_ptr: [*]const u8 = @ptrFromInt(u_ptr);
+        return byte_ptr[0..@as(usize, @as(u32, @bitCast(self.len)))];
     }
 
     pub fn deinit(self: *GuestBuffer) void {
@@ -113,7 +116,7 @@ pub fn exportExtractor(comptime Extractor: type) void {
         }
 
         pub export fn goaria_match(ptr: i32, len: i32) callconv(.c) i64 {
-            if (ptr == 0 or len <= 0) {
+            if (ptr <= 0 or len <= 0) {
                 return packJsonResponse(getAllocator(), types.MatchOutput{
                     .matched = false,
                     .confidence = null,
@@ -122,8 +125,9 @@ pub fn exportExtractor(comptime Extractor: type) void {
             }
 
             const allocator = getAllocator();
-            const byte_ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(ptr)));
-            const input_bytes = byte_ptr[0..@intCast(len)];
+            const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
+            const byte_ptr: [*]const u8 = @ptrFromInt(u_ptr);
+            const input_bytes = byte_ptr[0..@as(usize, @as(u32, @bitCast(len)))];
 
             var parsed = std.json.parseFromSlice(
                 types.MatchInput,
@@ -151,13 +155,14 @@ pub fn exportExtractor(comptime Extractor: type) void {
         }
 
         pub export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
-            if (ptr == 0 or len <= 0) {
+            if (ptr <= 0 or len <= 0) {
                 return packJsonResponse(getAllocator(), types.ExtractOutput.empty());
             }
 
             const allocator = getAllocator();
-            const byte_ptr: [*]const u8 = @ptrFromInt(@as(usize, @intCast(ptr)));
-            const input_bytes = byte_ptr[0..@intCast(len)];
+            const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
+            const byte_ptr: [*]const u8 = @ptrFromInt(u_ptr);
+            const input_bytes = byte_ptr[0..@as(usize, @as(u32, @bitCast(len)))];
 
             var parsed = std.json.parseFromSlice(
                 types.ExtractInput,

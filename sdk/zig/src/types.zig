@@ -71,8 +71,10 @@ pub const ExtractOutput = struct {
         return .{ .items = &.{} };
     }
 
-    pub fn single(item: ExtractedItemRef) ExtractOutput {
-        return .{ .items = &.{item} };
+    pub fn single(allocator: std.mem.Allocator, item: ExtractedItemRef) !ExtractOutput {
+        const slice = try allocator.alloc(ExtractedItemRef, 1);
+        slice[0] = item;
+        return .{ .items = slice };
     }
 };
 

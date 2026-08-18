@@ -1,0 +1,29 @@
+[package]
+name = "cargo-goaria-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI toolchain and local WASM runner for GoAria extractor packs"
+
+[dependencies]
+goaria-extractor-sdk = { path = "../goaria-extractor-sdk", version = "0.1.0" }
+wasmi = { workspace = true }
+ureq = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+base64 = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
+url = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[bin]]
+name = "cargo-goaria-pack"
+path = "src/main.rs"
+
+[lib]
+name = "cargo_goaria_pack"
+path = "src/lib.rs"

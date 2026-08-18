@@ -2,6 +2,7 @@
 members = [
     "crates/goaria-extractor-macro",
     "crates/goaria-extractor-sdk",
+    "crates/cargo-goaria-pack",
     "examples/rust_fixture_pack",
 ]
 resolver = "2"
@@ -20,3 +21,9 @@ syn = { version = "2.0", features = ["full", "extra-traits"] }
 quote = "1.0"
 proc-macro2 = "1.0"
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+wasmi = "0.40"
+ureq = { version = "2.10", default-features = false, features = ["tls", "json"] }
+thiserror = "1.0"
+url = "2.5"
+regex = "1.10"
+

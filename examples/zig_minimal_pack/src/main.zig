@@ -13,7 +13,6 @@ pub const MinimalExtractor = struct {
     }
 
     pub fn extract(allocator: std.mem.Allocator, input: goaria.ExtractInput) !goaria.ExtractOutput {
-        _ = allocator;
         if (std.mem.indexOf(u8, input.url, "fixture.invalid") == null) {
             return goaria.ExtractOutput.empty();
         }
@@ -26,7 +25,7 @@ pub const MinimalExtractor = struct {
             .mime_type = "application/octet-stream",
         };
 
-        return goaria.ExtractOutput.single(item);
+        return try goaria.ExtractOutput.single(allocator, item);
     }
 };
 
