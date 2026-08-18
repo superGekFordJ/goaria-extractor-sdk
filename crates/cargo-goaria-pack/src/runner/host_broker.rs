@@ -227,78 +227,88 @@ impl LiveBroker {
             }
         }
 
+        let max_bytes = req
+            .max_response_bytes
+            .unwrap_or(MAX_HOST_IMPORT_RESPONSE_BYTES as i64) as usize;
+
         match request.call() {
-            Ok(response) => {
-                let status = response.status() as i32;
-                let final_url = response.get_url().to_string();
-
-                let mut resp_headers = BTreeMap::new();
-                for safe_header in SAFE_RESPONSE_HEADERS {
-                    if let Some(val) = response.header(safe_header) {
-                        resp_headers.insert(safe_header.to_string(), vec![val.to_string()]);
-                    }
-                }
-
-                let max_bytes = req
-                    .max_response_bytes
-                    .unwrap_or(MAX_HOST_IMPORT_RESPONSE_BYTES as i64)
-                    as usize;
-                let mut reader = response.into_reader();
-                let mut body_bytes = Vec::new();
-                let mut chunk = [0u8; 8192];
-
-                loop {
-                    match reader.read(&mut chunk) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            if body_bytes.len() + n > max_bytes {
-                                return HostHTTPFetchResponse {
-                                    ok: false,
-                                    error_code: Some("response_too_large".to_string()),
-                                    message: Some(format!(
-                                        "response body exceeds {} bytes limit",
-                                        max_bytes
-                                    )),
-                                    ..Default::default()
-                                };
-                            }
-                            body_bytes.extend_from_slice(&chunk[..n]);
-                        }
-                        Err(e) => {
-                            return HostHTTPFetchResponse {
-                                ok: false,
-                                error_code: Some("read_error".to_string()),
-                                message: Some(format!("failed to read response body: {}", e)),
-                                ..Default::default()
-                            };
-                        }
-                    }
-                }
-
-                let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
-                HostHTTPFetchResponse {
-                    ok: (200..400).contains(&status),
-                    status_code: Some(status),
-                    final_url: Some(final_url),
-                    headers: Some(resp_headers),
-                    body_base64: Some(body_b64),
-                    error_code: None,
-                    message: None,
-                }
-            }
-            Err(ureq::Error::Status(status, response)) => HostHTTPFetchResponse {
-                ok: false,
-                status_code: Some(status as i32),
-                final_url: Some(response.get_url().to_string()),
-                error_code: Some("http_status_error".to_string()),
-                message: Some(format!("HTTP error status {}", status)),
-                ..Default::default()
-            },
+            Ok(response) => Self::process_response(response, max_bytes),
+            Err(ureq::Error::Status(_, response)) => Self::process_response(response, max_bytes),
             Err(ureq::Error::Transport(transport_err)) => HostHTTPFetchResponse {
                 ok: false,
                 error_code: Some("transport_error".to_string()),
                 message: Some(transport_err.to_string()),
                 ..Default::default()
+            },
+        }
+    }
+
+    fn process_response(response: ureq::Response, max_bytes: usize) -> HostHTTPFetchResponse {
+        let status = response.status() as i32;
+        let final_url = response.get_url().to_string();
+
+        let mut resp_headers = BTreeMap::new();
+        for safe_header in SAFE_RESPONSE_HEADERS {
+            if let Some(val) = response.header(safe_header) {
+                resp_headers.insert(safe_header.to_string(), vec![val.to_string()]);
+            }
+        }
+
+        let mut reader = response.into_reader();
+        let mut body_bytes = Vec::new();
+        let mut chunk = [0u8; 8192];
+
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if body_bytes.len() + n > max_bytes {
+                        return HostHTTPFetchResponse {
+                            ok: false,
+                            status_code: Some(status),
+                            final_url: Some(final_url),
+                            headers: Some(resp_headers),
+                            error_code: Some("response_too_large".to_string()),
+                            message: Some(format!(
+                                "response body exceeds {} bytes limit",
+                                max_bytes
+                            )),
+                            ..Default::default()
+                        };
+                    }
+                    body_bytes.extend_from_slice(&chunk[..n]);
+                }
+                Err(e) => {
+                    return HostHTTPFetchResponse {
+                        ok: false,
+                        status_code: Some(status),
+                        final_url: Some(final_url),
+                        headers: Some(resp_headers),
+                        error_code: Some("read_error".to_string()),
+                        message: Some(format!("failed to read response body: {}", e)),
+                        ..Default::default()
+                    };
+                }
+            }
+        }
+
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(&body_bytes);
+        let ok = (200..400).contains(&status);
+        HostHTTPFetchResponse {
+            ok,
+            status_code: Some(status),
+            final_url: Some(final_url),
+            headers: Some(resp_headers),
+            body_base64: Some(body_b64),
+            error_code: if ok {
+                None
+            } else {
+                Some("http_status_error".to_string())
+            },
+            message: if ok {
+                None
+            } else {
+                Some(format!("HTTP error status {}", status))
             },
         }
     }

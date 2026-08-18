@@ -106,13 +106,6 @@ impl WasmEngine {
                     _ => return 0,
                 };
 
-                // Track host-allocated buffer
-                caller.data_mut().memory_tracker.record_alloc(
-                    resp_ptr,
-                    resp_len as u32,
-                    "host_response_http_fetch",
-                );
-
                 if memory.write(&mut caller, resp_ptr as usize, &resp_bytes).is_err() {
                     return 0;
                 }
@@ -172,12 +165,6 @@ impl WasmEngine {
                     Ok(ptr) if ptr > 0 => ptr as u32,
                     _ => return 0,
                 };
-
-                caller.data_mut().memory_tracker.record_alloc(
-                    resp_ptr,
-                    resp_len as u32,
-                    "host_response_auth_profile_status",
-                );
 
                 if memory.write(&mut caller, resp_ptr as usize, &resp_bytes).is_err() {
                     return 0;

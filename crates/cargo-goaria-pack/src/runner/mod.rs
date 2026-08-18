@@ -161,7 +161,7 @@ impl ExtractorRunner {
         }
 
         let state = self.build_host_state();
-        let (output_bytes, final_state) =
+        let (output_res, final_state) =
             self.engine
                 .instantiate_and_run(state, |store, instance, memory| {
                     let alloc_fn: TypedFunc<i32, i32> = instance
@@ -216,6 +216,16 @@ impl ExtractorRunner {
                         return Err(wasmi::Error::new("guest returned empty output"));
                     }
 
+                    // Enforce output payload size limit before host buffer allocation
+                    let max_bytes = store.data().manifest.resource_limits.max_output_bytes as usize;
+                    if out_len as usize > max_bytes {
+                        let _ = free_fn.call(&mut *store, (out_ptr as i32, out_len as i32));
+                        return Ok(Err(RunnerError::Limits(LimitsError::OutputPayloadTooLarge {
+                            actual: out_len as usize,
+                            max: max_bytes,
+                        })));
+                    }
+
                     let mut out_bytes = vec![0u8; out_len as usize];
                     memory
                         .read(&*store, out_ptr as usize, &mut out_bytes)
@@ -226,16 +236,10 @@ impl ExtractorRunner {
                     // 6. Free output buffer in guest
                     free_fn.call(&mut *store, (out_ptr as i32, out_len as i32))?;
 
-                    Ok(out_bytes)
+                    Ok(Ok(out_bytes))
                 })?;
 
-        // Enforce output payload size limit
-        if output_bytes.len() > self.manifest.resource_limits.max_output_bytes as usize {
-            return Err(RunnerError::Limits(LimitsError::OutputPayloadTooLarge {
-                actual: output_bytes.len(),
-                max: self.manifest.resource_limits.max_output_bytes as usize,
-            }));
-        }
+        let output_bytes = output_res?;
 
         // 7. Verify memory leaks if enabled
         if self.options.verify_memory_leaks {
