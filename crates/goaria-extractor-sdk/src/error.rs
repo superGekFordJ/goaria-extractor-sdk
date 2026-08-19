@@ -15,10 +15,16 @@ impl fmt::Display for ExtractorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Serialization(msg) => write!(f, "serialization error: {}", msg),
-            Self::HostError { error_code, message } => {
+            Self::HostError {
+                error_code,
+                message,
+            } => {
                 write!(f, "host error [{}]: {}", error_code, message)
             }
-            Self::HttpError { status_code, message } => {
+            Self::HttpError {
+                status_code,
+                message,
+            } => {
                 write!(f, "HTTP error [{}]: {}", status_code, message)
             }
             Self::InvalidInput(msg) => write!(f, "invalid input: {}", msg),

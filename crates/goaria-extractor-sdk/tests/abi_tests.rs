@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use goaria_extractor_sdk::abi::{
     dispatch_extract, dispatch_match, pack_json_response, pack_result, unpack_result,
     CURRENT_ABI_VERSION,
@@ -6,6 +5,7 @@ use goaria_extractor_sdk::abi::{
 use goaria_extractor_sdk::alloc::{alloc, copy_slice_to_guest, free, GuestBuffer};
 use goaria_extractor_sdk::error::ExtractorError;
 use goaria_extractor_sdk::prelude::*;
+use std::collections::BTreeMap;
 
 // -----------------------------------------------------------------------------
 // 1. Bitshift Packing/Unpacking Tests
@@ -54,7 +54,10 @@ fn test_match_input_serde() {
         url: "https://share.fixture.invalid/item/123".to_string(),
     };
     let json_str = serde_json::to_string(&input).unwrap();
-    assert_eq!(json_str, r#"{"url":"https://share.fixture.invalid/item/123"}"#);
+    assert_eq!(
+        json_str,
+        r#"{"url":"https://share.fixture.invalid/item/123"}"#
+    );
 
     let parsed: MatchInput = serde_json::from_str(&json_str).unwrap();
     assert_eq!(parsed, input);
@@ -90,7 +93,10 @@ fn test_extract_input_serde() {
         url: "https://share.fixture.invalid/item/123".to_string(),
     };
     let json_str = serde_json::to_string(&input).unwrap();
-    assert_eq!(json_str, r#"{"url":"https://share.fixture.invalid/item/123"}"#);
+    assert_eq!(
+        json_str,
+        r#"{"url":"https://share.fixture.invalid/item/123"}"#
+    );
 }
 
 #[test]
@@ -164,7 +170,10 @@ fn test_host_http_fetch_request_and_response_serde() {
     assert_eq!(deserialized, req);
 
     let mut resp_headers = BTreeMap::new();
-    resp_headers.insert("content-type".to_string(), vec!["application/json".to_string()]);
+    resp_headers.insert(
+        "content-type".to_string(),
+        vec!["application/json".to_string()],
+    );
 
     let resp = HostHTTPFetchResponse {
         ok: true,
@@ -212,7 +221,8 @@ fn test_host_auth_profile_status_serde() {
     };
 
     let json_resp = serde_json::to_string(&resp).unwrap();
-    let deserialized_resp: HostAuthProfileStatusResponse = serde_json::from_str(&json_resp).unwrap();
+    let deserialized_resp: HostAuthProfileStatusResponse =
+        serde_json::from_str(&json_resp).unwrap();
     assert_eq!(deserialized_resp, resp);
 }
 
@@ -308,11 +318,15 @@ struct ErroringExtractor;
 
 impl Extractor for ErroringExtractor {
     fn match_url(&self, _input: MatchInput) -> Result<MatchOutput, ExtractorError> {
-        Err(ExtractorError::ExecutionFailed("custom failure".to_string()))
+        Err(ExtractorError::ExecutionFailed(
+            "custom failure".to_string(),
+        ))
     }
 
     fn extract(&self, _input: ExtractInput) -> Result<ExtractOutput, ExtractorError> {
-        Err(ExtractorError::ExecutionFailed("extract failed".to_string()))
+        Err(ExtractorError::ExecutionFailed(
+            "extract failed".to_string(),
+        ))
     }
 }
 

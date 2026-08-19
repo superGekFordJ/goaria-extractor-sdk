@@ -1,9 +1,7 @@
+use crate::manifest::{Manifest, ManifestError, CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use wasmparser::{ExternalKind, Parser, Payload, ValType};
-use crate::manifest::{
-    Manifest, ManifestError, CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH,
-};
 
 #[derive(Debug, Error)]
 pub enum CheckError {
@@ -95,8 +93,7 @@ pub fn analyze_wasm_bytecode(wasm_bytes: &[u8]) -> Result<WasmAnalysis, CheckErr
         match payload {
             Payload::TypeSection(reader) => {
                 for rec_group in reader {
-                    let rec_group =
-                        rec_group.map_err(|e| CheckError::WasmParser(e.to_string()))?;
+                    let rec_group = rec_group.map_err(|e| CheckError::WasmParser(e.to_string()))?;
                     for sub_type in rec_group.into_types() {
                         match &sub_type.composite_type.inner {
                             wasmparser::CompositeInnerType::Func(func_type) => {

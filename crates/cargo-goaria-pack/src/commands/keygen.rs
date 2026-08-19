@@ -1,6 +1,6 @@
-use colored::Colorize;
 use crate::cli::KeygenArgs;
 use crate::pack::crypto::{generate_keypair, CryptoError};
+use colored::Colorize;
 
 pub fn handle_keygen(args: KeygenArgs) -> Result<(), CryptoError> {
     let (signing_key, verifying_key) = generate_keypair();

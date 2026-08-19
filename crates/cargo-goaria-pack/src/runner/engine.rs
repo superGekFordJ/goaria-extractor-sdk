@@ -1,6 +1,4 @@
-use wasmi::{
-    Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store,
-};
+use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store};
 
 use goaria_extractor_sdk::abi::pack_result;
 use goaria_extractor_sdk::types::{HostAuthProfileStatusRequest, HostHTTPFetchRequest};
@@ -64,7 +62,10 @@ impl WasmEngine {
                 };
 
                 let mut req_bytes = vec![0u8; req_len as usize];
-                if memory.read(&caller, req_ptr as usize, &mut req_bytes).is_err() {
+                if memory
+                    .read(&caller, req_ptr as usize, &mut req_bytes)
+                    .is_err()
+                {
                     return 0;
                 }
 
@@ -91,14 +92,16 @@ impl WasmEngine {
                 }
 
                 // Allocate response buffer in guest memory
-                let alloc_func =
-                    match caller.get_export("goaria_alloc").and_then(Extern::into_func) {
-                        Some(f) => match f.typed::<i32, i32>(&caller) {
-                            Ok(tf) => tf,
-                            Err(_) => return 0,
-                        },
-                        None => return 0,
-                    };
+                let alloc_func = match caller
+                    .get_export("goaria_alloc")
+                    .and_then(Extern::into_func)
+                {
+                    Some(f) => match f.typed::<i32, i32>(&caller) {
+                        Ok(tf) => tf,
+                        Err(_) => return 0,
+                    },
+                    None => return 0,
+                };
 
                 let resp_len = resp_bytes.len() as i32;
                 let resp_ptr = match alloc_func.call(&mut caller, resp_len) {
@@ -106,7 +109,10 @@ impl WasmEngine {
                     _ => return 0,
                 };
 
-                if memory.write(&mut caller, resp_ptr as usize, &resp_bytes).is_err() {
+                if memory
+                    .write(&mut caller, resp_ptr as usize, &resp_bytes)
+                    .is_err()
+                {
                     return 0;
                 }
 
@@ -130,7 +136,10 @@ impl WasmEngine {
                 };
 
                 let mut req_bytes = vec![0u8; req_len as usize];
-                if memory.read(&caller, req_ptr as usize, &mut req_bytes).is_err() {
+                if memory
+                    .read(&caller, req_ptr as usize, &mut req_bytes)
+                    .is_err()
+                {
                     return 0;
                 }
 
@@ -151,14 +160,16 @@ impl WasmEngine {
                     Err(_) => return 0,
                 };
 
-                let alloc_func =
-                    match caller.get_export("goaria_alloc").and_then(Extern::into_func) {
-                        Some(f) => match f.typed::<i32, i32>(&caller) {
-                            Ok(tf) => tf,
-                            Err(_) => return 0,
-                        },
-                        None => return 0,
-                    };
+                let alloc_func = match caller
+                    .get_export("goaria_alloc")
+                    .and_then(Extern::into_func)
+                {
+                    Some(f) => match f.typed::<i32, i32>(&caller) {
+                        Ok(tf) => tf,
+                        Err(_) => return 0,
+                    },
+                    None => return 0,
+                };
 
                 let resp_len = resp_bytes.len() as i32;
                 let resp_ptr = match alloc_func.call(&mut caller, resp_len) {
@@ -166,7 +177,10 @@ impl WasmEngine {
                     _ => return 0,
                 };
 
-                if memory.write(&mut caller, resp_ptr as usize, &resp_bytes).is_err() {
+                if memory
+                    .write(&mut caller, resp_ptr as usize, &resp_bytes)
+                    .is_err()
+                {
                     return 0;
                 }
 
@@ -174,7 +188,9 @@ impl WasmEngine {
             },
         )?;
 
-        let instance = linker.instantiate(&mut store, &self.module)?.start(&mut store)?;
+        let instance = linker
+            .instantiate(&mut store, &self.module)?
+            .start(&mut store)?;
 
         let memory = instance
             .get_memory(&store, "memory")

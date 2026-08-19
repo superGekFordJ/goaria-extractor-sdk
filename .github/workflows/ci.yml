@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    name: Test & Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.16.0
+
+      - name: Check Rust formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Rust workspace unit and integration tests
+        run: cargo test --workspace --all-targets
+
+      - name: Run Zig SDK unit tests
+        run: zig test sdk/zig/src/root.zig
+
+      - name: Build Zig minimal pack example
+        run: zig build --release=small
+        working-directory: examples/zig_minimal_pack
+
+      - name: Test CLI check on Rust fixture pack
+        run: cargo run -p cargo-goaria-pack -- check --project-dir examples/rust_fixture_pack
+
+      - name: Test CLI pack on Rust fixture pack
+        run: cargo run -p cargo-goaria-pack -- pack --project-dir examples/rust_fixture_pack --out-dir dist
+
+      - name: Test CLI check on Zig minimal pack
+        run: cargo run -p cargo-goaria-pack -- check --project-dir examples/zig_minimal_pack
+
+      - name: Test CLI pack on Zig minimal pack
+        run: cargo run -p cargo-goaria-pack -- pack --project-dir examples/zig_minimal_pack --out-dir dist

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use cargo_goaria_pack::check::{
     analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError, WasmAnalysis,
 };
@@ -9,6 +8,7 @@ use cargo_goaria_pack::commands::test::handle_test;
 use cargo_goaria_pack::manifest::Manifest;
 use cargo_goaria_pack::pack::{LockEntry, LockFile, LOCK_SCHEMA_VERSION};
 use cargo_goaria_pack::scaffold::{scaffold_project, validate_pack_name, ScaffoldError};
+use std::path::PathBuf;
 
 #[test]
 fn test_scaffold_rust_project() {
@@ -109,7 +109,10 @@ fn test_lockfile_generation_and_serialization() {
     assert_eq!(roundtrip.schema_version, LOCK_SCHEMA_VERSION);
     assert_eq!(roundtrip.packs.len(), 1);
     assert_eq!(roundtrip.packs[0].pack_id, "test-pack");
-    assert_eq!(roundtrip.packs[0].asset_path, "dist/test-pack-0.1.0.pack.zip");
+    assert_eq!(
+        roundtrip.packs[0].asset_path,
+        "dist/test-pack-0.1.0.pack.zip"
+    );
 }
 
 #[test]
@@ -144,23 +147,38 @@ fn test_wasm_static_analyzer_on_fixture() {
     assert!(analysis.memory_exported);
 
     assert_eq!(
-        analysis.export_signatures.get("goaria_abi_version").map(|s| s.as_str()),
+        analysis
+            .export_signatures
+            .get("goaria_abi_version")
+            .map(|s| s.as_str()),
         Some("() -> i32")
     );
     assert_eq!(
-        analysis.export_signatures.get("goaria_alloc").map(|s| s.as_str()),
+        analysis
+            .export_signatures
+            .get("goaria_alloc")
+            .map(|s| s.as_str()),
         Some("(i32) -> i32")
     );
     assert_eq!(
-        analysis.export_signatures.get("goaria_free").map(|s| s.as_str()),
+        analysis
+            .export_signatures
+            .get("goaria_free")
+            .map(|s| s.as_str()),
         Some("(i32, i32) -> ()")
     );
     assert_eq!(
-        analysis.export_signatures.get("goaria_match").map(|s| s.as_str()),
+        analysis
+            .export_signatures
+            .get("goaria_match")
+            .map(|s| s.as_str()),
         Some("(i32, i32) -> i64")
     );
     assert_eq!(
-        analysis.export_signatures.get("goaria_extract").map(|s| s.as_str()),
+        analysis
+            .export_signatures
+            .get("goaria_extract")
+            .map(|s| s.as_str()),
         Some("(i32, i32) -> i64")
     );
 
@@ -173,17 +191,28 @@ fn test_wasm_static_analyzer_signature_mismatch() {
     let manifest: Manifest = serde_json::from_str(manifest_str).expect("parse manifest");
 
     let mut analysis = WasmAnalysis {
-        exports: ["goaria_abi_version", "goaria_alloc", "goaria_free", "goaria_match", "goaria_extract", "memory"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+        exports: [
+            "goaria_abi_version",
+            "goaria_alloc",
+            "goaria_free",
+            "goaria_match",
+            "goaria_extract",
+            "memory",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
         memory_exported: true,
         ..Default::default()
     };
-    analysis.export_signatures.insert("goaria_abi_version".to_string(), "() -> i64".to_string());
+    analysis
+        .export_signatures
+        .insert("goaria_abi_version".to_string(), "() -> i64".to_string());
 
     let res = verify_wasm_and_manifest(&analysis, &manifest);
-    assert!(matches!(res, Err(CheckError::InvalidExportSignature { name, expected, actual }) if name == "goaria_abi_version" && expected == "() -> i32" && actual == "() -> i64"));
+    assert!(
+        matches!(res, Err(CheckError::InvalidExportSignature { name, expected, actual }) if name == "goaria_abi_version" && expected == "() -> i32" && actual == "() -> i64")
+    );
 }
 
 #[test]
@@ -215,7 +244,8 @@ fn test_pack_pipeline_on_fixture() {
         assert!(temp_out.path().join("rust-fixture-pack.lock.json").exists());
 
         // Verify lockfile content
-        let lock_raw = std::fs::read_to_string(temp_out.path().join("rust-fixture-pack.lock.json")).unwrap();
+        let lock_raw =
+            std::fs::read_to_string(temp_out.path().join("rust-fixture-pack.lock.json")).unwrap();
         let lock: LockFile = serde_json::from_str(&lock_raw).unwrap();
         assert!(!lock.packs[0].asset_path.contains('\\'));
     }

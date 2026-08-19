@@ -99,14 +99,16 @@ impl ExtractorRunner {
     /// Check guest ABI version matches expected version 1.
     pub fn check_abi(&self) -> Result<u32, RunnerError> {
         let state = self.build_host_state();
-        let (version, _) = self.engine.instantiate_and_run(state, |store, instance, _| {
-            let version_fn: TypedFunc<(), i32> = instance
-                .get_typed_func(&*store, "goaria_abi_version")
-                .map_err(|e| wasmi::Error::new(format!("missing goaria_abi_version: {}", e)))?;
+        let (version, _) = self
+            .engine
+            .instantiate_and_run(state, |store, instance, _| {
+                let version_fn: TypedFunc<(), i32> = instance
+                    .get_typed_func(&*store, "goaria_abi_version")
+                    .map_err(|e| wasmi::Error::new(format!("missing goaria_abi_version: {}", e)))?;
 
-            let ver = version_fn.call(&mut *store, ())?;
-            Ok(ver as u32)
-        })?;
+                let ver = version_fn.call(&mut *store, ())?;
+                Ok(ver as u32)
+            })?;
 
         if version != CURRENT_ABI_VERSION {
             return Err(RunnerError::AbiVersionMismatch {
@@ -190,9 +192,7 @@ impl ExtractorRunner {
                     // 2. Write input into guest memory
                     memory
                         .write(&mut *store, input_ptr as usize, input_bytes)
-                        .map_err(|e| {
-                            wasmi::Error::new(format!("memory write error: {}", e))
-                        })?;
+                        .map_err(|e| wasmi::Error::new(format!("memory write error: {}", e)))?;
 
                     // 3. Call target operation
                     let packed_result = op_fn.call(&mut *store, (input_ptr, input_len))?;
@@ -205,9 +205,7 @@ impl ExtractorRunner {
                         .record_free(input_ptr as u32, input_len as u32);
 
                     if packed_result == 0 {
-                        return Err(wasmi::Error::new(
-                            "guest returned null packed result",
-                        ));
+                        return Err(wasmi::Error::new("guest returned null packed result"));
                     }
 
                     // 5. Read output from guest memory
@@ -220,18 +218,18 @@ impl ExtractorRunner {
                     let max_bytes = store.data().manifest.resource_limits.max_output_bytes as usize;
                     if out_len as usize > max_bytes {
                         let _ = free_fn.call(&mut *store, (out_ptr as i32, out_len as i32));
-                        return Ok(Err(RunnerError::Limits(LimitsError::OutputPayloadTooLarge {
-                            actual: out_len as usize,
-                            max: max_bytes,
-                        })));
+                        return Ok(Err(RunnerError::Limits(
+                            LimitsError::OutputPayloadTooLarge {
+                                actual: out_len as usize,
+                                max: max_bytes,
+                            },
+                        )));
                     }
 
                     let mut out_bytes = vec![0u8; out_len as usize];
                     memory
                         .read(&*store, out_ptr as usize, &mut out_bytes)
-                        .map_err(|e| {
-                            wasmi::Error::new(format!("memory read error: {}", e))
-                        })?;
+                        .map_err(|e| wasmi::Error::new(format!("memory read error: {}", e)))?;
 
                     // 6. Free output buffer in guest
                     free_fn.call(&mut *store, (out_ptr as i32, out_len as i32))?;

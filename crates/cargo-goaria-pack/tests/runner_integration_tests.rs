@@ -87,7 +87,10 @@ fn test_manifest_error_conditions() {
         payload_sha256: None,
     };
 
-    assert_eq!(manifest.validate_runnable(), Err(ManifestError::EmptyPackId));
+    assert_eq!(
+        manifest.validate_runnable(),
+        Err(ManifestError::EmptyPackId)
+    );
 
     manifest.pack_id = "test-pack".to_string();
     manifest.abi_version = 99;
@@ -144,7 +147,9 @@ fn test_mock_broker_matching() {
         method: Some("GET".to_string()),
         ..Default::default()
     };
-    let resp = broker.resolve(&req_exact).expect("should resolve exact match");
+    let resp = broker
+        .resolve(&req_exact)
+        .expect("should resolve exact match");
     assert!(resp.ok);
     assert_eq!(resp.status_code, Some(200));
 
@@ -153,7 +158,9 @@ fn test_mock_broker_matching() {
         method: Some("GET".to_string()),
         ..Default::default()
     };
-    let resp_prefix = broker.resolve(&req_prefix).expect("should resolve prefix match");
+    let resp_prefix = broker
+        .resolve(&req_prefix)
+        .expect("should resolve prefix match");
     assert!(resp_prefix.ok);
 
     let req_endpoint = HostHTTPFetchRequest {
@@ -161,7 +168,9 @@ fn test_mock_broker_matching() {
         endpoint_ref: Some("ep-1".to_string()),
         ..Default::default()
     };
-    let resp_ep = broker.resolve(&req_endpoint).expect("should resolve endpoint match");
+    let resp_ep = broker
+        .resolve(&req_endpoint)
+        .expect("should resolve endpoint match");
     assert!(resp_ep.ok);
 
     let req_unmatched = HostHTTPFetchRequest {
@@ -200,7 +209,10 @@ fn test_auth_provider_simulation() {
     assert_eq!(resp.available, Some(true));
     assert_eq!(resp.kind, Some(AuthSecretKind::Bearer));
     assert_eq!(resp.redacted_display.as_deref(), Some("eyJh..."));
-    assert_eq!(auth.get_secret("default"), Some("secret_token_123".to_string()));
+    assert_eq!(
+        auth.get_secret("default"),
+        Some("secret_token_123".to_string())
+    );
 
     // Missing profile
     let req_missing = HostAuthProfileStatusRequest {

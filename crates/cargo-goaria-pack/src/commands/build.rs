@@ -1,8 +1,8 @@
+use crate::cli::BuildArgs;
+use colored::Colorize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use colored::Colorize;
 use thiserror::Error;
-use crate::cli::BuildArgs;
 
 #[derive(Debug, Error)]
 pub enum BuildError {
@@ -28,7 +28,9 @@ pub fn detect_project_type(project_dir: &Path) -> Result<ProjectType, BuildError
     } else if project_dir.join("build.zig").exists() {
         Ok(ProjectType::Zig)
     } else {
-        Err(BuildError::NoProjectFound(project_dir.display().to_string()))
+        Err(BuildError::NoProjectFound(
+            project_dir.display().to_string(),
+        ))
     }
 }
 
@@ -70,7 +72,7 @@ fn build_zig_wasm(project_dir: &Path, release: bool) -> Result<PathBuf, BuildErr
     let mut cmd = Command::new("zig");
     cmd.arg("build").current_dir(project_dir);
     if release {
-        cmd.arg("-Doptimize=ReleaseSmall");
+        cmd.arg("--release=small");
     }
 
     let status = cmd.status()?;
@@ -162,7 +164,9 @@ pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBu
         }
     }
 
-    Err(BuildError::WasmNotFound(search_dirs[0].display().to_string()))
+    Err(BuildError::WasmNotFound(
+        search_dirs[0].display().to_string(),
+    ))
 }
 
 pub fn find_zig_wasm_binary(project_dir: &Path) -> Result<PathBuf, BuildError> {
@@ -187,7 +191,9 @@ pub fn find_zig_wasm_binary(project_dir: &Path) -> Result<PathBuf, BuildError> {
         }
     }
 
-    Err(BuildError::WasmNotFound(search_dirs[0].display().to_string()))
+    Err(BuildError::WasmNotFound(
+        search_dirs[0].display().to_string(),
+    ))
 }
 
 fn find_wasm_in_dir(dir: &Path) -> Result<Option<PathBuf>, BuildError> {

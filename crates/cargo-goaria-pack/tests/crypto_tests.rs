@@ -60,12 +60,18 @@ fn test_signing_tamper_detection() {
     // 1. Tamper with manifest content
     let tampered_manifest = b"{\"pack_id\":\"tampered-pack\"}";
     let res1 = verify_manifest_signature(&verifying_key, tampered_manifest, &sig_bytes);
-    assert!(matches!(res1, Err(CryptoError::SignatureVerificationFailed)));
+    assert!(matches!(
+        res1,
+        Err(CryptoError::SignatureVerificationFailed)
+    ));
 
     // 2. Tamper with signature bytes
     sig_bytes[0] ^= 0xFF;
     let res2 = verify_manifest_signature(&verifying_key, manifest_json, &sig_bytes);
-    assert!(matches!(res2, Err(CryptoError::SignatureVerificationFailed)));
+    assert!(matches!(
+        res2,
+        Err(CryptoError::SignatureVerificationFailed)
+    ));
 
     // 3. Invalid signature length
     let res3 = verify_manifest_signature(&verifying_key, manifest_json, &sig_bytes[..32]);

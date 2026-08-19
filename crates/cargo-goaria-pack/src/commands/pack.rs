@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use colored::Colorize;
-use thiserror::Error;
 use crate::check::{analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError};
 use crate::cli::PackArgs;
 use crate::commands::build::{build_wasm, find_rust_wasm_binary, find_zig_wasm_binary, BuildError};
@@ -11,6 +8,9 @@ use crate::pack::crypto::{
 };
 use crate::pack::lock::{LockEntry, LockFile};
 use crate::pack::zip::{build_deterministic_pack_zip, ZipPackError};
+use colored::Colorize;
+use std::path::PathBuf;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PackCommandError {
@@ -35,8 +35,7 @@ pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
 
     // 1. Build WASM if needed
     let wasm_path = if args.skip_build {
-        find_rust_wasm_binary(project_dir, true)
-            .or_else(|_| find_zig_wasm_binary(project_dir))?
+        find_rust_wasm_binary(project_dir, true).or_else(|_| find_zig_wasm_binary(project_dir))?
     } else {
         build_wasm(project_dir, true)?
     };
@@ -90,9 +89,9 @@ pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
     let asset_sha = sha256_hex(&zip_bytes);
 
     // 8. Determine asset filenames
-    let zip_name = args.asset_name.unwrap_or_else(|| {
-        format!("{}-{}.pack.zip", manifest.pack_id, manifest.pack_version)
-    });
+    let zip_name = args
+        .asset_name
+        .unwrap_or_else(|| format!("{}-{}.pack.zip", manifest.pack_id, manifest.pack_version));
     let zip_path = out_dir.join(&zip_name);
     let lock_path = out_dir.join(format!("{}.lock.json", manifest.pack_id));
 

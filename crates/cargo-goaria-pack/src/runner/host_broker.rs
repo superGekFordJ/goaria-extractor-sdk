@@ -20,12 +20,8 @@ static SAFE_REQUEST_HEADERS: &[&str] = &[
     "user-agent",
 ];
 
-static SAFE_RESPONSE_HEADERS: &[&str] = &[
-    "content-length",
-    "content-type",
-    "etag",
-    "last-modified",
-];
+static SAFE_RESPONSE_HEADERS: &[&str] =
+    &["content-length", "content-type", "etag", "last-modified"];
 
 static FORBIDDEN_PACK_HEADERS: &[&str] = &[
     "authorization",

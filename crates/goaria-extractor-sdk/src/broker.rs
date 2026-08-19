@@ -1,11 +1,11 @@
-use std::collections::BTreeMap;
-use base64::Engine;
 use crate::error::ExtractorError;
 use crate::host::{raw_auth_profile_status, raw_http_fetch};
 use crate::types::{
-    HostAuthProfileStatusRequest, HostAuthProfileStatusResponse,
-    HostHTTPFetchRequest, HostHTTPFetchResponse,
+    HostAuthProfileStatusRequest, HostAuthProfileStatusResponse, HostHTTPFetchRequest,
+    HostHTTPFetchResponse,
 };
+use base64::Engine;
+use std::collections::BTreeMap;
 
 /// High-level client API for calling GoAria host services.
 #[derive(Debug, Default, Clone, Copy)]
@@ -17,7 +17,10 @@ impl HostBroker {
     }
 
     /// Execute a general HTTP fetch request via host broker.
-    pub fn fetch(&self, req: &HostHTTPFetchRequest) -> Result<HostHTTPFetchResponse, ExtractorError> {
+    pub fn fetch(
+        &self,
+        req: &HostHTTPFetchRequest,
+    ) -> Result<HostHTTPFetchResponse, ExtractorError> {
         let req_json = serde_json::to_vec(req)?;
         let buf = raw_http_fetch(&req_json)?;
         let resp: HostHTTPFetchResponse = serde_json::from_slice(buf.as_slice())?;
@@ -25,7 +28,10 @@ impl HostBroker {
     }
 
     /// Fetch a direct URL via legacy raw mode.
-    pub fn fetch_url(&self, url: impl Into<String>) -> Result<HostHTTPFetchResponse, ExtractorError> {
+    pub fn fetch_url(
+        &self,
+        url: impl Into<String>,
+    ) -> Result<HostHTTPFetchResponse, ExtractorError> {
         self.fetch(&HostHTTPFetchRequest {
             url: Some(url.into()),
             method: Some("GET".to_string()),
@@ -43,7 +49,11 @@ impl HostBroker {
         self.fetch(&HostHTTPFetchRequest {
             broker_policy_ref: Some(broker_policy_ref.into()),
             endpoint_ref: Some(endpoint_ref.into()),
-            params: if params.is_empty() { None } else { Some(params) },
+            params: if params.is_empty() {
+                None
+            } else {
+                Some(params)
+            },
             ..Default::default()
         })
     }
@@ -53,7 +63,9 @@ impl HostBroker {
         let resp = self.fetch(req)?;
         if !resp.ok {
             return Err(ExtractorError::HostError {
-                error_code: resp.error_code.unwrap_or_else(|| "unknown_error".to_string()),
+                error_code: resp
+                    .error_code
+                    .unwrap_or_else(|| "unknown_error".to_string()),
                 message: resp.message.unwrap_or_else(|| "fetch failed".to_string()),
             });
         }
@@ -65,7 +77,8 @@ impl HostBroker {
     /// Fetch and decode the response body as a UTF-8 string.
     pub fn fetch_text(&self, req: &HostHTTPFetchRequest) -> Result<String, ExtractorError> {
         let bytes = self.fetch_bytes(req)?;
-        String::from_utf8(bytes).map_err(|e| ExtractorError::ExecutionFailed(format!("invalid utf-8 body: {}", e)))
+        String::from_utf8(bytes)
+            .map_err(|e| ExtractorError::ExecutionFailed(format!("invalid utf-8 body: {}", e)))
     }
 
     /// Fetch and deserialize JSON payload into type `T`.
@@ -114,7 +127,11 @@ impl HostBroker {
             auth_profile_ref: auth_profile_ref.into(),
             broker_policy_ref: Some(broker_policy_ref.into()),
             endpoint_ref: Some(endpoint_ref.into()),
-            params: if params.is_empty() { None } else { Some(params) },
+            params: if params.is_empty() {
+                None
+            } else {
+                Some(params)
+            },
             ..Default::default()
         })?;
         Ok(resp.ok && resp.available.unwrap_or(false))

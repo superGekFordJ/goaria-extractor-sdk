@@ -1,7 +1,7 @@
-use clap::Parser;
-use colored::Colorize;
 use cargo_goaria_pack::cli::{Cli, Command};
 use cargo_goaria_pack::commands::*;
+use clap::Parser;
+use colored::Colorize;
 
 fn main() {
     // Handle cargo invoking us as `cargo goaria-pack ...`

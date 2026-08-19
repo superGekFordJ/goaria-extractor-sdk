@@ -1,5 +1,5 @@
-use std::path::Path;
 use crate::scaffold::ScaffoldError;
+use std::path::Path;
 
 pub fn generate(name: &str, target_dir: &Path) -> Result<(), ScaffoldError> {
     let src_dir = target_dir.join("src");

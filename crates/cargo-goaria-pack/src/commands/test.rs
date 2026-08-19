@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::time::Instant;
-use base64::Engine;
-use colored::Colorize;
-use thiserror::Error;
 use crate::cli::TestArgs;
 use crate::commands::check::resolve_manifest_and_wasm;
 use crate::runner::{ExtractorRunner, MockBroker, MockBrokerRule, RunnerError, UrlPattern};
+use base64::Engine;
+use colored::Colorize;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum TestCommandError {
@@ -113,8 +113,11 @@ fn add_single_fixture_rule(val: serde_json::Value, broker: &mut MockBroker) {
 }
 
 pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
-    let (manifest, wasm_path, wasm_bytes) =
-        resolve_manifest_and_wasm(&args.project_dir, args.manifest.as_ref(), args.wasm.as_ref())?;
+    let (manifest, wasm_path, wasm_bytes) = resolve_manifest_and_wasm(
+        &args.project_dir,
+        args.manifest.as_ref(),
+        args.wasm.as_ref(),
+    )?;
 
     println!(
         "{} running test suite on {} (pack_id: '{}')...\n",

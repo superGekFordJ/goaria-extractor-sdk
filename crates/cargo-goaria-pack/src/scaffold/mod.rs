@@ -1,9 +1,9 @@
 pub mod rust;
 pub mod zig;
 
+use crate::cli::Language;
 use std::path::Path;
 use thiserror::Error;
-use crate::cli::Language;
 
 #[derive(Debug, Error)]
 pub enum ScaffoldError {
@@ -19,19 +19,28 @@ pub fn validate_pack_name(name: &str) -> Result<(), ScaffoldError> {
     if name.is_empty() || name.len() > 50 {
         return Err(ScaffoldError::InvalidPackName(name.to_string()));
     }
-    if !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
         return Err(ScaffoldError::InvalidPackName(name.to_string()));
     }
     Ok(())
 }
 
-pub fn scaffold_project(name: &str, lang: Language, target_dir: &Path) -> Result<(), ScaffoldError> {
+pub fn scaffold_project(
+    name: &str,
+    lang: Language,
+    target_dir: &Path,
+) -> Result<(), ScaffoldError> {
     validate_pack_name(name)?;
 
     if target_dir.exists() {
         let mut entries = std::fs::read_dir(target_dir)?;
         if entries.next().is_some() {
-            return Err(ScaffoldError::DirectoryNotEmpty(target_dir.display().to_string()));
+            return Err(ScaffoldError::DirectoryNotEmpty(
+                target_dir.display().to_string(),
+            ));
         }
     } else {
         std::fs::create_dir_all(target_dir)?;

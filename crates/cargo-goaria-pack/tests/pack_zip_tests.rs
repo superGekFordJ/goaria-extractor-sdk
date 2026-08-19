@@ -1,6 +1,6 @@
+use cargo_goaria_pack::pack::{build_deterministic_pack_zip, sha256_hex, ZipPackError};
 use std::io::{Cursor, Read};
 use zip::CompressionMethod;
-use cargo_goaria_pack::pack::{build_deterministic_pack_zip, sha256_hex, ZipPackError};
 
 #[test]
 fn test_deterministic_zip_reproducibility() {
@@ -33,7 +33,10 @@ fn test_deterministic_zip_reproducibility() {
     let zip1 = build_deterministic_pack_zip(manifest_bytes, payload_bytes, sig_bytes).unwrap();
     let zip2 = build_deterministic_pack_zip(manifest_bytes, payload_bytes, sig_bytes).unwrap();
 
-    assert_eq!(zip1, zip2, "Deterministic zip output must be byte-for-byte identical");
+    assert_eq!(
+        zip1, zip2,
+        "Deterministic zip output must be byte-for-byte identical"
+    );
     assert_eq!(sha256_hex(&zip1), sha256_hex(&zip2));
 }
 

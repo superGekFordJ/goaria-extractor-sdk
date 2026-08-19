@@ -1,8 +1,8 @@
-use std::path::Path;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

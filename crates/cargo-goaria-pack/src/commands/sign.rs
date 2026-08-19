@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use colored::Colorize;
 use crate::cli::SignArgs;
 use crate::pack::crypto::{parse_signing_key, sha256_hex, sign_manifest, CryptoError};
+use colored::Colorize;
+use std::path::PathBuf;
 
 pub fn handle_sign(args: SignArgs) -> Result<PathBuf, CryptoError> {
     let signing_key = parse_signing_key(&args.key)?;

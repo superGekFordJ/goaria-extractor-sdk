@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use goaria_extractor_sdk::prelude::*;
+use std::collections::BTreeMap;
 
 #[goaria_pack]
 #[derive(Default)]

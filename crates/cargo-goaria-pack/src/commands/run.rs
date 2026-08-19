@@ -1,10 +1,10 @@
-use std::time::Instant;
-use colored::Colorize;
-use goaria_extractor_sdk::types::AuthSecretKind;
-use thiserror::Error;
 use crate::cli::RunArgs;
 use crate::commands::check::resolve_manifest_and_wasm;
 use crate::runner::{AuthProvider, ExtractorRunner, RunnerError};
+use colored::Colorize;
+use goaria_extractor_sdk::types::AuthSecretKind;
+use std::time::Instant;
+use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RunCommandError {
@@ -15,8 +15,11 @@ pub enum RunCommandError {
 }
 
 pub fn handle_run(args: RunArgs) -> Result<(), RunCommandError> {
-    let (manifest, _wasm_path, wasm_bytes) =
-        resolve_manifest_and_wasm(&args.project_dir, args.manifest.as_ref(), args.wasm.as_ref())?;
+    let (manifest, _wasm_path, wasm_bytes) = resolve_manifest_and_wasm(
+        &args.project_dir,
+        args.manifest.as_ref(),
+        args.wasm.as_ref(),
+    )?;
 
     let mut runner = ExtractorRunner::new(&wasm_bytes, manifest)?;
     if args.live {

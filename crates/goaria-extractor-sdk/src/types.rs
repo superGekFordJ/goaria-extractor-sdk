@@ -1,5 +1,5 @@
-use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Input payload passed to goaria_match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
