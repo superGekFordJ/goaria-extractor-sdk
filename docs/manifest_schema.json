@@ -29,18 +29,9 @@
       "enum": [1],
       "description": "Target ABI version (currently 1)."
     },
-    "name": {
-      "type": "string",
-      "description": "Human-readable display name for the extractor pack."
-    },
     "description": {
       "type": "string",
       "description": "Short summary describing what URLs this extractor handles."
-    },
-    "authors": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "List of pack authors or maintainers."
     },
     "capabilities": {
       "type": "array",
