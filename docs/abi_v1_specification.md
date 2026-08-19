@@ -63,7 +63,8 @@ The memory lifecycle strictly prevents memory leaks across host-guest boundaries
    - Host calls `goaria_alloc(len)` to obtain `ptr`.
    - Host writes serialized JSON input into `memory[ptr : ptr+len]`.
    - Host calls `goaria_match(ptr, len)` or `goaria_extract(ptr, len)`.
-   - Guest reads the input buffer and deallocates it before returning, or host calls `goaria_free(ptr, len)` if guest indicates non-ownership. In the standard SDK implementation, the guest claims ownership and frees the input buffer.
+   - Guest borrows the slice immutably during execution without freeing it.
+   - Host is solely responsible for freeing the input buffer by invoking `goaria_free(ptr, len)` immediately after guest invocation returns.
 2. **Guest-to-Host Output**:
    - Guest serializes JSON output into its heap.
    - Guest returns packed `(ptr << 32) | len`.
@@ -333,10 +334,12 @@ The packaging tool outputs a companion lock file matching schema version `1`:
       "pack_version": "0.1.0",
       "asset_path": "rust-fixture-pack-0.1.0.pack.zip",
       "asset_sha256": "5cba1e59b9604d173531b8c864df60d9ba7d8a83e8223ebc59169a885994bd80",
-      "public_key": "207a067892821e25d770f1fba0c47c11ff4b813e54162ece9eb839e076231ab6",
+      "public_keys": [
+        "207a067892821e25d770f1fba0c47c11ff4b813e54162ece9eb839e076231ab6"
+      ],
       "manifest_sha256": "95e6d3b9253e6e5a56229045582062cf19a05dd84b9b076646dd04def3af16da",
       "payload_sha256": "616c6c6d7dbcfd077ae669da8b5514db7f93637240d6960bb28b15c4225f9367",
-      "sig_sha256": "6fb073e2e8738fdb1526644e7c73f02faf93216a0e19f46ac959281dbb38f84e"
+      "signature_sha256": "6fb073e2e8738fdb1526644e7c73f02faf93216a0e19f46ac959281dbb38f84e"
     }
   ]
 }
