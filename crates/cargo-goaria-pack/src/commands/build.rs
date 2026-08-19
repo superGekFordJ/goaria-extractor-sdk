@@ -81,53 +81,113 @@ fn build_zig_wasm(project_dir: &Path, release: bool) -> Result<PathBuf, BuildErr
     find_zig_wasm_binary(project_dir)
 }
 
-pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBuf, BuildError> {
-    let mode = if release { "release" } else { "debug" };
-    // Check local target directory
-    let local_target = project_dir
-        .join("target")
-        .join("wasm32-unknown-unknown")
-        .join(mode);
-    if local_target.exists() {
-        if let Some(wasm) = find_wasm_in_dir(&local_target)? {
-            return Ok(wasm);
-        }
-    }
-    // Check parent target directory if in workspace
-    let parent_target = project_dir
-        .join("..")
-        .join("target")
-        .join("wasm32-unknown-unknown")
-        .join(mode);
-    if parent_target.exists() {
-        if let Some(wasm) = find_wasm_in_dir(&parent_target)? {
-            return Ok(wasm);
-        }
-    }
-    // Check workspace root target directory
-    let ws_target = project_dir
-        .join("..")
-        .join("..")
-        .join("target")
-        .join("wasm32-unknown-unknown")
-        .join(mode);
-    if ws_target.exists() {
-        if let Some(wasm) = find_wasm_in_dir(&ws_target)? {
-            return Ok(wasm);
+fn get_project_candidate_names(project_dir: &Path) -> Vec<String> {
+    let mut names = Vec::new();
+
+    // 1. Check manifest.json for pack_id
+    if let Ok(content) = std::fs::read_to_string(project_dir.join("manifest.json")) {
+        if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(pack_id) = manifest.get("pack_id").and_then(|v| v.as_str()) {
+                let pack_id_clean = pack_id.trim();
+                if !pack_id_clean.is_empty() {
+                    names.push(pack_id_clean.replace('-', "_"));
+                    names.push(pack_id_clean.to_string());
+                }
+            }
         }
     }
 
-    Err(BuildError::WasmNotFound(local_target.display().to_string()))
+    // 2. Check Cargo.toml for package name
+    if let Ok(content) = std::fs::read_to_string(project_dir.join("Cargo.toml")) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("name") && trimmed.contains('=') {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let name = val.trim().trim_matches('"').trim_matches('\'').trim();
+                    if !name.is_empty() {
+                        names.push(name.replace('-', "_"));
+                        names.push(name.to_string());
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // 3. Check directory name
+    if let Some(dir_name) = project_dir.file_name().and_then(|s| s.to_str()) {
+        names.push(dir_name.replace('-', "_"));
+        names.push(dir_name.to_string());
+    }
+
+    names.dedup();
+    names
+}
+
+pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBuf, BuildError> {
+    let mode = if release { "release" } else { "debug" };
+    let candidate_names = get_project_candidate_names(project_dir);
+
+    let search_dirs = [
+        project_dir
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join(mode),
+        project_dir
+            .join("..")
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join(mode),
+        project_dir
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join(mode),
+    ];
+
+    for target_dir in &search_dirs {
+        if target_dir.exists() {
+            // First check specific candidate names
+            for name in &candidate_names {
+                let candidate_path = target_dir.join(format!("{}.wasm", name));
+                if candidate_path.exists() && candidate_path.is_file() {
+                    return Ok(candidate_path);
+                }
+            }
+            // Fall back to any .wasm in directory
+            if let Some(wasm) = find_wasm_in_dir(target_dir)? {
+                return Ok(wasm);
+            }
+        }
+    }
+
+    Err(BuildError::WasmNotFound(search_dirs[0].display().to_string()))
 }
 
 pub fn find_zig_wasm_binary(project_dir: &Path) -> Result<PathBuf, BuildError> {
-    let zig_out = project_dir.join("zig-out").join("bin");
-    if zig_out.exists() {
-        if let Some(wasm) = find_wasm_in_dir(&zig_out)? {
-            return Ok(wasm);
+    let candidate_names = get_project_candidate_names(project_dir);
+
+    let search_dirs = [
+        project_dir.join("zig-out").join("bin"),
+        project_dir.join("..").join("zig-out").join("bin"),
+    ];
+
+    for target_dir in &search_dirs {
+        if target_dir.exists() {
+            for name in &candidate_names {
+                let candidate_path = target_dir.join(format!("{}.wasm", name));
+                if candidate_path.exists() && candidate_path.is_file() {
+                    return Ok(candidate_path);
+                }
+            }
+            if let Some(wasm) = find_wasm_in_dir(target_dir)? {
+                return Ok(wasm);
+            }
         }
     }
-    Err(BuildError::WasmNotFound(zig_out.display().to_string()))
+
+    Err(BuildError::WasmNotFound(search_dirs[0].display().to_string()))
 }
 
 fn find_wasm_in_dir(dir: &Path) -> Result<Option<PathBuf>, BuildError> {

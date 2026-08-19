@@ -14,29 +14,17 @@ pub fn resolve_manifest_and_wasm(
         .cloned()
         .unwrap_or_else(|| project_dir.join("manifest.json"));
 
-    let manifest_str = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        CheckError::Manifest(crate::manifest::ManifestError::InvalidUrl(format!(
-            "failed to read manifest: {}",
-            e
-        )))
-    })?;
-    let manifest: Manifest = serde_json::from_str(&manifest_str).map_err(|e| {
-        CheckError::Manifest(crate::manifest::ManifestError::InvalidUrl(format!(
-            "invalid JSON: {}",
-            e
-        )))
-    })?;
+    let manifest_str = std::fs::read_to_string(&manifest_path)?;
+    let manifest: Manifest = serde_json::from_str(&manifest_str)?;
 
     let wasm_path = if let Some(p) = explicit_wasm {
         p.clone()
     } else {
         find_rust_wasm_binary(project_dir, true)
-            .or_else(|_| find_zig_wasm_binary(project_dir))
-            .map_err(|e| CheckError::WasmParser(e.to_string()))?
+            .or_else(|_| find_zig_wasm_binary(project_dir))?
     };
 
-    let wasm_bytes = std::fs::read(&wasm_path)
-        .map_err(|e| CheckError::WasmParser(format!("failed to read wasm file: {}", e)))?;
+    let wasm_bytes = std::fs::read(&wasm_path)?;
 
     Ok((manifest, wasm_path, wasm_bytes))
 }

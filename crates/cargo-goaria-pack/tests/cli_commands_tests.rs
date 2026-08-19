@@ -1,7 +1,9 @@
 use std::path::PathBuf;
-use cargo_goaria_pack::check::{analyze_wasm_bytecode, verify_wasm_and_manifest};
-use cargo_goaria_pack::cli::{Language, PackArgs};
+use cargo_goaria_pack::check::{analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError};
+use cargo_goaria_pack::cli::{CheckArgs, Language, PackArgs, TestArgs};
+use cargo_goaria_pack::commands::check::{handle_check, resolve_manifest_and_wasm};
 use cargo_goaria_pack::commands::pack::handle_pack;
+use cargo_goaria_pack::commands::test::handle_test;
 use cargo_goaria_pack::manifest::Manifest;
 use cargo_goaria_pack::pack::{LockEntry, LockFile, LOCK_SCHEMA_VERSION};
 use cargo_goaria_pack::scaffold::{scaffold_project, validate_pack_name, ScaffoldError};
@@ -137,7 +139,7 @@ fn test_wasm_static_analyzer_on_fixture() {
     assert!(analysis.exports.contains("goaria_free"));
     assert!(analysis.exports.contains("goaria_match"));
     assert!(analysis.exports.contains("goaria_extract"));
-    assert!(analysis.memory_exported || analysis.exports.contains("memory"));
+    assert!(analysis.memory_exported);
 
     assert!(verify_wasm_and_manifest(&analysis, &manifest).is_ok());
 }
@@ -170,4 +172,45 @@ fn test_pack_pipeline_on_fixture() {
         assert!(temp_out.path().join("manifest.sig").exists());
         assert!(temp_out.path().join("rust-fixture-pack.lock.json").exists());
     }
+}
+
+#[test]
+fn test_check_and_test_commands_on_fixture() {
+    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("rust_fixture_pack");
+
+    let check_args = CheckArgs {
+        project_dir: fixture_dir.clone(),
+        wasm: None,
+        manifest: None,
+    };
+    let _ = handle_check(check_args);
+
+    let test_args = TestArgs {
+        project_dir: fixture_dir,
+        wasm: None,
+        manifest: None,
+        live: false,
+        fixtures: None,
+    };
+    let _ = handle_test(test_args);
+}
+
+#[test]
+fn test_resolve_manifest_errors() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let invalid_json_manifest = temp_dir.path().join("manifest.json");
+    std::fs::write(&invalid_json_manifest, "{ invalid json }").unwrap();
+
+    let res = resolve_manifest_and_wasm(temp_dir.path(), Some(&invalid_json_manifest), None);
+    assert!(matches!(res, Err(CheckError::Json(_))));
+
+    let non_existent = temp_dir.path().join("does_not_exist.json");
+    let res_io = resolve_manifest_and_wasm(temp_dir.path(), Some(&non_existent), None);
+    assert!(matches!(res_io, Err(CheckError::Io(_))));
 }

@@ -9,6 +9,12 @@ use crate::manifest::{
 pub enum CheckError {
     #[error("manifest validation error: {0}")]
     Manifest(#[from] ManifestError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON parse error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("build error: {0}")]
+    Build(#[from] crate::commands::build::BuildError),
     #[error("WASM parser error: {0}")]
     WasmParser(String),
     #[error("missing required export function: '{0}'")]
@@ -87,7 +93,7 @@ pub fn verify_wasm_and_manifest(
     }
 
     // 3. Validate linear memory export
-    if !analysis.memory_exported && !analysis.exports.contains("memory") {
+    if !analysis.memory_exported {
         return Err(CheckError::MissingMemoryExport);
     }
 
