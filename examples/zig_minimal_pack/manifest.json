@@ -2,9 +2,7 @@
   "pack_id": "zig-minimal-pack",
   "pack_version": "0.1.0",
   "abi_version": 1,
-  "name": "Zig Minimal Pack",
   "description": "Reference Zig URL extractor pack for GoAria SDK testing",
-  "authors": ["GoAria Team"],
   "domains": [
     {
       "host": "share.fixture.invalid",

@@ -107,7 +107,7 @@ pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
         pack_id: manifest.pack_id.clone(),
         pack_version: manifest.pack_version.clone(),
         asset_url: None,
-        asset_path: zip_name.clone(),
+        asset_path: zip_name.replace('\\', "/"),
         asset_sha256: asset_sha.clone(),
         public_keys: vec![pub_key_hex.clone()],
         manifest_sha256: Some(manifest_sha.clone()),

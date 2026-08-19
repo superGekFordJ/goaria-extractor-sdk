@@ -52,11 +52,7 @@ pub fn build(b: *std.Build) void {
   "pack_id": "{name}",
   "pack_version": "0.1.0",
   "abi_version": 1,
-  "name": "{name}",
   "description": "GoAria extractor pack for {name}",
-  "authors": [
-    "Extractor Developer <developer@example.com>"
-  ],
   "domains": [
     {{
       "host": "fixture.invalid",
@@ -84,35 +80,44 @@ pub fn build(b: *std.Build) void {
 
 var allocator = std.heap.page_allocator;
 
-export fn goaria_abi_version() u32 {
+inline fn packResult(ptr: u32, len: u32) i64 {
+    const val = (@as(u64, ptr) << 32) | @as(u64, len);
+    return @bitCast(val);
+}
+
+export fn goaria_abi_version() callconv(.c) i32 {
     return 1;
 }
 
-export fn goaria_alloc(size: u32) ?[*]u8 {
-    const slice = allocator.alloc(u8, size) catch return null;
-    return slice.ptr;
+export fn goaria_alloc(len: i32) callconv(.c) i32 {
+    if (len <= 0) return 0;
+    const slice = allocator.alloc(u8, @intCast(len)) catch return 0;
+    return @intCast(@intFromPtr(slice.ptr));
 }
 
-export fn goaria_free(ptr: ?[*]u8, size: u32) void {
-    if (ptr) |p| {
-        allocator.free(p[0..size]);
-    }
+export fn goaria_free(ptr: i32, len: i32) callconv(.c) void {
+    if (ptr <= 0 or len <= 0) return;
+    const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
+    const slice: []u8 = @as([*]u8, @ptrFromInt(u_ptr))[0..@as(usize, @as(u32, @bitCast(len)))];
+    allocator.free(slice);
 }
 
-export fn goaria_match(input_ptr: [*]const u8, input_len: u32, out_size: *u32) ?[*]const u8 {
-    _ = input_ptr;
-    _ = input_len;
+export fn goaria_match(ptr: i32, len: i32) callconv(.c) i64 {
+    _ = ptr;
+    _ = len;
     const result = "{\"matched\":true,\"confidence\":100,\"reason\":\"matches fixture domain\"}";
-    out_size.* = result.len;
-    return result.ptr;
+    const out_slice = allocator.alloc(u8, result.len) catch return 0;
+    @memcpy(out_slice, result);
+    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
 }
 
-export fn goaria_extract(input_ptr: [*]const u8, input_len: u32, out_size: *u32) ?[*]const u8 {
-    _ = input_ptr;
-    _ = input_len;
+export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
+    _ = ptr;
+    _ = len;
     const result = "{\"items\":[{\"id\":\"item-001\",\"url\":\"https://fixture.invalid/file.bin\",\"filename\":\"file.bin\"}]}";
-    out_size.* = result.len;
-    return result.ptr;
+    const out_slice = allocator.alloc(u8, result.len) catch return 0;
+    @memcpy(out_slice, result);
+    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
 }
 "#;
     std::fs::write(src_dir.join("main.zig"), main_zig)?;

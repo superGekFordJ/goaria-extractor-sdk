@@ -75,9 +75,7 @@ fn test_manifest_error_conditions() {
         pack_id: "".to_string(),
         pack_version: "0.1.0".to_string(),
         abi_version: 1,
-        name: None,
         description: None,
-        authors: None,
         capabilities: vec![Capability::parse_wasm()],
         domains: vec![DomainRule {
             host: "fixture.invalid".to_string(),

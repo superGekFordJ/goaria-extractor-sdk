@@ -28,11 +28,7 @@ serde_json = {{ version = "1.0", default-features = false, features = ["alloc"] 
   "pack_id": "{name}",
   "pack_version": "0.1.0",
   "abi_version": 1,
-  "name": "{name}",
   "description": "GoAria extractor pack for {name}",
-  "authors": [
-    "Extractor Developer <developer@example.com>"
-  ],
   "domains": [
     {{
       "host": "fixture.invalid",
