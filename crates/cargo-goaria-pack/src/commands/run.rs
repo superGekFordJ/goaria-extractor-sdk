@@ -99,7 +99,7 @@ pub fn handle_run(args: RunArgs) -> Result<(), RunCommandError> {
     println!("\n{}", "── Runtime Metrics ──────────────────────".dimmed());
     println!("  Elapsed Time: {:.2?}", elapsed);
     println!(
-        "  Memory Check: {} (0 bytes leaked)",
+        "  Host-visible buffer ownership: {}",
         "PASSED".green().bold()
     );
 

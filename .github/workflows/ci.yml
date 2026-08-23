@@ -39,15 +39,18 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Build Rust fixture pack for test suite
+        run: cargo build -p rust_fixture_pack --target wasm32-unknown-unknown --release
+
+      - name: Build Zig minimal pack example
+        run: zig build --release=small
+        working-directory: examples/zig_minimal_pack
+
       - name: Run Rust workspace unit and integration tests
         run: cargo test --workspace --all-targets
 
       - name: Run Zig SDK unit tests
         run: zig test sdk/zig/src/root.zig
-
-      - name: Build Zig minimal pack example
-        run: zig build --release=small
-        working-directory: examples/zig_minimal_pack
 
       - name: Test CLI check on Rust fixture pack
         run: cargo run -p cargo-goaria-pack -- check --project-dir examples/rust_fixture_pack

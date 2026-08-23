@@ -48,7 +48,7 @@ flowchart TB
 
 | Path | Purpose | Documentation |
 | :--- | :--- | :--- |
-| [`crates/goaria-extractor-sdk`](crates/goaria-extractor-sdk) | High-level Rust SDK library & `#[goaria_pack]` procedural macro | [Rust Guide](docs/README.md#2-rust-extractor-authoring-guide) |
+| [`crates/goaria-extractor-sdk`](crates/goaria-extractor-sdk) | High-level Rust SDK library & `#[goaria_extractor]` procedural macro | [Rust Guide](docs/README.md#2-rust-extractor-authoring-guide) |
 | [`crates/cargo-goaria-pack`](crates/cargo-goaria-pack) | CLI toolchain (`new`, `build`, `check`, `test`, `run`, `keygen`, `pack`) | [CLI Reference](docs/README.md#4-cli-command-reference-cargo-goaria-pack) |
 | [`sdk/zig`](sdk/zig) | Official Zig SDK library for `wasm32-freestanding` | [Zig Guide](docs/README.md#3-zig-extractor-authoring-guide) |
 | [`examples/rust_fixture_pack`](examples/rust_fixture_pack) | Production-ready reference extractor written in Rust | [Example Code](examples/rust_fixture_pack) |
@@ -84,17 +84,19 @@ cd my-extractor
 ### 2. Implement URL Matching & Extraction
 Edit `src/lib.rs` to define pattern matching and artifact extraction rules using the Rust SDK.
 
-### 3. Verify Static ABI & Bytecode
+### 3. Build the WebAssembly Module
 ```bash
-cargo goaria-pack check
+cargo goaria-pack build
 ```
 
-### 4. Test Extraction with Local Mock Broker
+### 4. Verify and Test Locally
 ```bash
+cargo goaria-pack check
+cargo goaria-pack test
 cargo goaria-pack run https://share.fixture.invalid/item/123
 ```
 
-### 5. Build, Sign, and Package for Distribution
+### 5. Sign and Package for Distribution
 ```bash
 cargo goaria-pack pack --out-dir dist
 ```

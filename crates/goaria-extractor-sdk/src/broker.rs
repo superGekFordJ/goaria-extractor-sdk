@@ -7,6 +7,34 @@ use crate::types::{
 use base64::Engine;
 use std::collections::BTreeMap;
 
+pub fn ensure_fetch_success(
+    response: HostHTTPFetchResponse,
+) -> Result<HostHTTPFetchResponse, ExtractorError> {
+    if !response.ok {
+        return Err(ExtractorError::HostError {
+            error_code: response
+                .error_code
+                .clone()
+                .unwrap_or_else(|| "unknown_error".into()),
+            message: response
+                .message
+                .clone()
+                .unwrap_or_else(|| "host call failed".into()),
+        });
+    }
+
+    if let Some(status) = response.status_code {
+        if status >= 400 {
+            return Err(ExtractorError::HttpError {
+                status_code: status,
+                message: format!("HTTP status {}", status),
+            });
+        }
+    }
+
+    Ok(response)
+}
+
 /// High-level client API for calling GoAria host services.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HostBroker;
@@ -24,7 +52,7 @@ impl HostBroker {
         let req_json = serde_json::to_vec(req)?;
         let buf = raw_http_fetch(&req_json)?;
         let resp: HostHTTPFetchResponse = serde_json::from_slice(buf.as_slice())?;
-        Ok(resp)
+        ensure_fetch_success(resp)
     }
 
     /// Fetch a direct URL via legacy raw mode.
@@ -61,14 +89,6 @@ impl HostBroker {
     /// Fetch and decode the response body as raw bytes.
     pub fn fetch_bytes(&self, req: &HostHTTPFetchRequest) -> Result<Vec<u8>, ExtractorError> {
         let resp = self.fetch(req)?;
-        if !resp.ok {
-            return Err(ExtractorError::HostError {
-                error_code: resp
-                    .error_code
-                    .unwrap_or_else(|| "unknown_error".to_string()),
-                message: resp.message.unwrap_or_else(|| "fetch failed".to_string()),
-            });
-        }
         let b64 = resp.body_base64.unwrap_or_default();
         let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
         Ok(bytes)
@@ -112,7 +132,17 @@ impl HostBroker {
             url: Some(url.into()),
             ..Default::default()
         })?;
-        Ok(resp.ok && resp.available.unwrap_or(false))
+        if !resp.ok {
+            return Err(ExtractorError::HostError {
+                error_code: resp
+                    .error_code
+                    .unwrap_or_else(|| "unknown_error".to_string()),
+                message: resp
+                    .message
+                    .unwrap_or_else(|| "auth profile status failed".to_string()),
+            });
+        }
+        Ok(resp.available.unwrap_or(false))
     }
 
     /// Check whether an auth profile is available for an alias ref endpoint.
@@ -134,7 +164,17 @@ impl HostBroker {
             },
             ..Default::default()
         })?;
-        Ok(resp.ok && resp.available.unwrap_or(false))
+        if !resp.ok {
+            return Err(ExtractorError::HostError {
+                error_code: resp
+                    .error_code
+                    .unwrap_or_else(|| "unknown_error".to_string()),
+                message: resp
+                    .message
+                    .unwrap_or_else(|| "auth profile status failed".to_string()),
+            });
+        }
+        Ok(resp.available.unwrap_or(false))
     }
 
     /// Convenience check for whether an auth profile is available for a URL.

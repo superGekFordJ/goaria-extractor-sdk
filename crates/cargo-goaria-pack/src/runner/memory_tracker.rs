@@ -3,17 +3,17 @@ use thiserror::Error;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MemoryTrackerError {
-    #[error("attempted to free unregistered memory buffer at ptr {ptr:#x} (len {len})")]
+    #[error("attempted to release unregistered host-visible buffer at ptr {ptr:#x} (len {len})")]
     UnregisteredFree { ptr: u32, len: u32 },
     #[error(
-        "free length mismatch at ptr {ptr:#x}: allocated {allocated_len}, attempted to free {free_len}"
+        "host-visible buffer length mismatch at ptr {ptr:#x}: registered {allocated_len}, released {free_len}"
     )]
     LengthMismatch {
         ptr: u32,
         allocated_len: u32,
         free_len: u32,
     },
-    #[error("memory leaks detected: {unfreed_count} un-freed buffers ({unfreed_bytes} bytes)")]
+    #[error("host-visible buffer ownership check failed: {unfreed_count} un-released buffers ({unfreed_bytes} bytes)")]
     MemoryLeaksDetected {
         unfreed_count: usize,
         unfreed_bytes: u64,
@@ -35,7 +35,8 @@ pub struct AllocationRecord {
     pub tag: &'static str,
 }
 
-/// Tracks guest allocations and deallocations to detect memory leaks.
+/// Tracks ownership of buffers visible at the host/guest ABI boundary.
+/// It does not observe arbitrary allocations performed inside the guest allocator.
 #[derive(Debug, Default, Clone)]
 pub struct MemoryTracker {
     allocations: BTreeMap<u32, AllocationRecord>,
@@ -62,20 +63,20 @@ impl MemoryTracker {
             return Ok(());
         }
 
-        match self.allocations.remove(&ptr) {
-            Some(record) => {
-                if record.len != len {
-                    return Err(MemoryTrackerError::LengthMismatch {
-                        ptr,
-                        allocated_len: record.len,
-                        free_len: len,
-                    });
-                }
-                self.total_freed_bytes += len as u64;
-                Ok(())
-            }
-            None => Err(MemoryTrackerError::UnregisteredFree { ptr, len }),
+        let Some(record) = self.allocations.get(&ptr) else {
+            return Err(MemoryTrackerError::UnregisteredFree { ptr, len });
+        };
+        if record.len != len {
+            return Err(MemoryTrackerError::LengthMismatch {
+                ptr,
+                allocated_len: record.len,
+                free_len: len,
+            });
         }
+
+        self.allocations.remove(&ptr);
+        self.total_freed_bytes += len as u64;
+        Ok(())
     }
 
     pub fn check_leaks(&self) -> Result<(), MemoryTrackerError> {

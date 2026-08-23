@@ -5,46 +5,54 @@ pub mod limits;
 pub mod memory_tracker;
 
 use thiserror::Error;
-use wasmi::TypedFunc;
+use wasmi::{StoreLimitsBuilder, TypedFunc};
 
-use goaria_extractor_sdk::abi::unpack_result;
+use goaria_extractor_sdk::abi::{unpack_result, CURRENT_ABI_VERSION};
 use goaria_extractor_sdk::types::{ExtractInput, ExtractOutput, MatchInput, MatchOutput};
 
-use crate::manifest::{Manifest, ManifestError, CURRENT_ABI_VERSION};
-pub use auth_provider::AuthProvider;
-pub use engine::{HostState, WasmEngine};
-pub use host_broker::{HostBroker, LiveBroker, MockBroker, MockBrokerRule, UrlPattern};
-pub use limits::{HostCallBudget, LimitsError, MAX_ABI_INPUT_BYTES};
-pub use memory_tracker::{MemoryTracker, MemoryTrackerError};
+use crate::manifest::{Manifest, ManifestError};
+pub use crate::runner::auth_provider::AuthProvider;
+use crate::runner::engine::{HostState, WasmEngine};
+pub use crate::runner::host_broker::{
+    HostBroker, LiveBroker, MockBroker, MockBrokerRule, UrlPattern,
+};
+pub use crate::runner::limits::{
+    HostCallBudget, LimitsError, MAX_ABI_INPUT_BYTES, MAX_HOST_IMPORT_REQUEST_BYTES,
+    MAX_HOST_IMPORT_RESPONSE_BYTES,
+};
+pub use crate::runner::memory_tracker::{MemoryTracker, MemoryTrackerError};
+
+const MAX_ABI_REASON_BYTES: usize = 512;
+const MAX_ABI_STRING_FIELD_BYTES: usize = 1024;
+const MAX_ABI_URL_BYTES: usize = 2048;
+const MAX_ABI_METADATA_ENTRIES: usize = 16;
+const MAX_ABI_METADATA_KEY_BYTES: usize = 64;
+const MAX_ABI_METADATA_VALUE_BYTES: usize = 512;
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
     #[error("manifest error: {0}")]
     Manifest(#[from] ManifestError),
-    #[error("wasm engine error: {0}")]
-    Wasm(#[from] wasmi::Error),
-    #[error("resource limits error: {0}")]
+    #[error("WASM engine error: {0}")]
+    Engine(#[from] wasmi::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("ABI validation error: {0}")]
+    AbiValidation(String),
+    #[error("resource limits exceeded: {0}")]
     Limits(#[from] LimitsError),
-    #[error("memory leak error: {0}")]
-    MemoryLeak(#[from] MemoryTrackerError),
-    #[error("JSON serialization error: {0}")]
-    Serialization(#[from] serde_json::Error),
-    #[error("missing export function '{0}'")]
-    MissingExport(String),
-    #[error("guest returned null or empty output pointer")]
-    EmptyOutputPointer,
-    #[error("ABI version mismatch: expected {expected}, guest returned {actual}")]
+    #[error("host-visible buffer ownership violation: {0}")]
+    Memory(#[from] MemoryTrackerError),
+    #[error("pack abi_version {actual} does not match runner expected abi_version {expected}")]
     AbiVersionMismatch { expected: u32, actual: u32 },
-    #[error("guest memory read/write out of bounds")]
-    MemoryOutOfBounds,
 }
 
-/// Configuration options for ExtractorRunner.
+/// Execution options and mocked environments for WASM runner.
 #[derive(Debug, Clone)]
 pub struct RunnerOptions {
     pub broker: HostBroker,
     pub auth_provider: AuthProvider,
-    pub verify_memory_leaks: bool,
+    pub verify_buffer_ownership: bool,
 }
 
 impl Default for RunnerOptions {
@@ -52,7 +60,7 @@ impl Default for RunnerOptions {
         Self {
             broker: HostBroker::Mock(MockBroker::new()),
             auth_provider: AuthProvider::new(),
-            verify_memory_leaks: true,
+            verify_buffer_ownership: true,
         }
     }
 }
@@ -122,34 +130,34 @@ impl ExtractorRunner {
 
     /// Execute `goaria_match` against a candidate URL.
     pub fn match_url(&self, url: &str) -> Result<MatchOutput, RunnerError> {
+        validate_abi_url(url, "match input url")?;
         let input = MatchInput {
             url: url.to_string(),
         };
         let input_bytes = serde_json::to_vec(&input)?;
 
         let output_bytes = self.run_operation("goaria_match", &input_bytes)?;
-        let output: MatchOutput = serde_json::from_slice(&output_bytes)?;
-
-        Ok(output)
+        decode_match_output(&output_bytes)
     }
 
     /// Execute `goaria_extract` against a target URL.
     pub fn extract(&self, url: &str) -> Result<ExtractOutput, RunnerError> {
+        validate_abi_url(url, "extract input url")?;
         let input = ExtractInput {
             url: url.to_string(),
         };
         let input_bytes = serde_json::to_vec(&input)?;
 
         let output_bytes = self.run_operation("goaria_extract", &input_bytes)?;
-        let output: ExtractOutput = serde_json::from_slice(&output_bytes)?;
+        let output = decode_extract_output(&output_bytes)?;
 
-        // Enforce output item count limit
         if output.items.len() > self.manifest.resource_limits.max_output_items as usize {
             return Err(RunnerError::Limits(LimitsError::TooManyOutputItems {
                 actual: output.items.len(),
                 max: self.manifest.resource_limits.max_output_items as usize,
             }));
         }
+        validate_extract_output(&output)?;
 
         Ok(output)
     }
@@ -199,10 +207,13 @@ impl ExtractorRunner {
 
                     // 4. Free input buffer
                     free_fn.call(&mut *store, (input_ptr, input_len))?;
-                    let _ = store
+                    if let Err(error) = store
                         .data_mut()
                         .memory_tracker
-                        .record_free(input_ptr as u32, input_len as u32);
+                        .record_free(input_ptr as u32, input_len as u32)
+                    {
+                        return Ok(Err(RunnerError::Memory(error)));
+                    }
 
                     if packed_result == 0 {
                         return Err(wasmi::Error::new("guest returned null packed result"));
@@ -214,10 +225,23 @@ impl ExtractorRunner {
                         return Err(wasmi::Error::new("guest returned empty output"));
                     }
 
+                    store.data_mut().memory_tracker.record_alloc(
+                        out_ptr,
+                        out_len,
+                        "guest_output_buffer",
+                    );
+
                     // Enforce output payload size limit before host buffer allocation
                     let max_bytes = store.data().manifest.resource_limits.max_output_bytes as usize;
                     if out_len as usize > max_bytes {
-                        let _ = free_fn.call(&mut *store, (out_ptr as i32, out_len as i32));
+                        free_fn.call(&mut *store, (out_ptr as i32, out_len as i32))?;
+                        if let Err(error) = store
+                            .data_mut()
+                            .memory_tracker
+                            .record_free(out_ptr, out_len)
+                        {
+                            return Ok(Err(RunnerError::Memory(error)));
+                        }
                         return Ok(Err(RunnerError::Limits(
                             LimitsError::OutputPayloadTooLarge {
                                 actual: out_len as usize,
@@ -227,20 +251,32 @@ impl ExtractorRunner {
                     }
 
                     let mut out_bytes = vec![0u8; out_len as usize];
-                    memory
-                        .read(&*store, out_ptr as usize, &mut out_bytes)
-                        .map_err(|e| wasmi::Error::new(format!("memory read error: {}", e)))?;
+                    if let Err(error) = memory.read(&*store, out_ptr as usize, &mut out_bytes) {
+                        free_fn.call(&mut *store, (out_ptr as i32, out_len as i32))?;
+                        let _ = store
+                            .data_mut()
+                            .memory_tracker
+                            .record_free(out_ptr, out_len);
+                        return Err(wasmi::Error::new(format!("memory read error: {error}")));
+                    }
 
                     // 6. Free output buffer in guest
                     free_fn.call(&mut *store, (out_ptr as i32, out_len as i32))?;
+                    if let Err(error) = store
+                        .data_mut()
+                        .memory_tracker
+                        .record_free(out_ptr, out_len)
+                    {
+                        return Ok(Err(RunnerError::Memory(error)));
+                    }
 
                     Ok(Ok(out_bytes))
                 })?;
 
         let output_bytes = output_res?;
 
-        // 7. Verify memory leaks if enabled
-        if self.options.verify_memory_leaks {
+        // 7. Verify host-visible buffer ownership if enabled
+        if self.options.verify_buffer_ownership {
             final_state.memory_tracker.check_leaks()?;
         }
 
@@ -248,12 +284,301 @@ impl ExtractorRunner {
     }
 
     fn build_host_state(&self) -> HostState {
+        let max_memory_pages = self.manifest.resource_limits.max_memory_pages;
+        let max_bytes = (max_memory_pages as usize).saturating_mul(64 * 1024);
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(max_bytes)
+            .memories(1)
+            .trap_on_grow_failure(true)
+            .build();
+
         HostState {
             manifest: self.manifest.clone(),
             budget: HostCallBudget::new(self.manifest.resource_limits.max_host_calls),
             broker: self.options.broker.clone(),
             auth_provider: self.options.auth_provider.clone(),
             memory_tracker: MemoryTracker::new(),
+            limits,
+        }
+    }
+}
+
+fn decode_match_output(raw: &[u8]) -> Result<MatchOutput, RunnerError> {
+    let output: MatchOutput = serde_json::from_slice(raw)?;
+    validate_match_output(&output)?;
+    Ok(output)
+}
+
+fn decode_extract_output(raw: &[u8]) -> Result<ExtractOutput, RunnerError> {
+    Ok(serde_json::from_slice(raw)?)
+}
+
+fn validate_match_output(output: &MatchOutput) -> Result<(), RunnerError> {
+    if let Some(reason) = &output.reason {
+        if reason.len() > MAX_ABI_REASON_BYTES {
+            return Err(validation_error(format!(
+                "match reason exceeds {MAX_ABI_REASON_BYTES} bytes"
+            )));
+        }
+        validate_safe_string(reason, "match reason")?;
+    }
+    Ok(())
+}
+
+fn validate_extract_output(output: &ExtractOutput) -> Result<(), RunnerError> {
+    for (index, item) in output.items.iter().enumerate() {
+        if item.size_bytes.is_some_and(|size| size < 0) {
+            return Err(validation_error(format!(
+                "extract output item {index}: size_bytes must not be negative"
+            )));
+        }
+        if let Some(url) = item.url.as_deref().filter(|url| !url.is_empty()) {
+            validate_abi_url(url, "item url").map_err(|error| {
+                validation_error(format!("extract output item {index}: {error}"))
+            })?;
+        }
+
+        for (name, value) in [
+            ("id", item.id.as_deref()),
+            ("filename", item.filename.as_deref()),
+            ("mime_type", item.mime_type.as_deref()),
+            ("auth_profile_ref", item.auth_profile_ref.as_deref()),
+            ("header_profile_ref", item.header_profile_ref.as_deref()),
+        ] {
+            if let Some(value) = value {
+                if value.len() > MAX_ABI_STRING_FIELD_BYTES {
+                    return Err(validation_error(format!(
+                        "extract output item {index}: {name} exceeds {MAX_ABI_STRING_FIELD_BYTES} bytes"
+                    )));
+                }
+                validate_safe_string(value, name).map_err(|error| {
+                    validation_error(format!("extract output item {index}: {error}"))
+                })?;
+            }
+        }
+
+        if let Some(metadata) = &item.metadata {
+            if metadata.len() > MAX_ABI_METADATA_ENTRIES {
+                return Err(validation_error(format!(
+                    "extract output item {index}: metadata has more than {MAX_ABI_METADATA_ENTRIES} entries"
+                )));
+            }
+            for (key, value) in metadata {
+                if key.is_empty() {
+                    return Err(validation_error(format!(
+                        "extract output item {index}: metadata key must be non-empty"
+                    )));
+                }
+                if key.len() > MAX_ABI_METADATA_KEY_BYTES {
+                    return Err(validation_error(format!(
+                        "extract output item {index}: metadata key exceeds {MAX_ABI_METADATA_KEY_BYTES} bytes"
+                    )));
+                }
+                if value.len() > MAX_ABI_METADATA_VALUE_BYTES {
+                    return Err(validation_error(format!(
+                        "extract output item {index}: metadata value exceeds {MAX_ABI_METADATA_VALUE_BYTES} bytes"
+                    )));
+                }
+                validate_safe_string(key, "metadata key").map_err(|error| {
+                    validation_error(format!("extract output item {index}: {error}"))
+                })?;
+                validate_safe_string(value, "metadata value").map_err(|error| {
+                    validation_error(format!("extract output item {index}: {error}"))
+                })?;
+                if is_credential_shaped_metadata_key(key) {
+                    return Err(validation_error(format!(
+                        "extract output item {index}: metadata key '{key}' is credential-shaped"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_abi_url(raw_url: &str, field: &str) -> Result<(), RunnerError> {
+    if raw_url.is_empty() {
+        return Err(validation_error(format!("{field} must be non-empty")));
+    }
+    if raw_url.len() > MAX_ABI_URL_BYTES {
+        return Err(validation_error(format!(
+            "{field} exceeds {MAX_ABI_URL_BYTES} bytes"
+        )));
+    }
+    validate_safe_string(raw_url, field)?;
+    if raw_url.trim() != raw_url {
+        return Err(validation_error(format!("{field} must be trimmed")));
+    }
+
+    let (_, remainder) = raw_url
+        .split_once("://")
+        .ok_or_else(|| validation_error(format!("{field} is malformed")))?;
+    let authority = remainder.split(['/', '?', '#']).next().unwrap_or_default();
+    if authority.is_empty() {
+        return Err(validation_error(format!("{field} must include host")));
+    }
+
+    let parsed =
+        url::Url::parse(raw_url).map_err(|_| validation_error(format!("{field} is malformed")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(validation_error(format!("{field} must use http or https")));
+    }
+    if authority.contains('@') || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(validation_error(format!(
+            "{field} must not contain credentials"
+        )));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| validation_error(format!("{field} must include host")))?;
+    if host.contains('%') {
+        return Err(validation_error(format!(
+            "{field} host must not contain escapes"
+        )));
+    }
+    if (host.contains(':') || authority.ends_with(':')) && parsed.port().is_none() {
+        return Err(validation_error(format!(
+            "{field} host contains invalid port"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_safe_string(value: &str, field: &str) -> Result<(), RunnerError> {
+    if value
+        .chars()
+        .any(|character| character <= '\u{1f}' || character == '\u{7f}')
+    {
+        return Err(validation_error(format!(
+            "{field} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn is_credential_shaped_metadata_key(key: &str) -> bool {
+    let normalized = key.trim().to_lowercase();
+    let normalized_underscore: String = normalized
+        .chars()
+        .map(|character| match character {
+            '-' | ' ' | '.' | ':' | '/' => '_',
+            _ => character,
+        })
+        .collect();
+
+    if matches!(
+        normalized.as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "token"
+            | "secret"
+            | "api_key"
+            | "x-api-key"
+    ) || matches!(
+        normalized_underscore.as_str(),
+        "authorization"
+            | "proxy_authorization"
+            | "cookie"
+            | "set_cookie"
+            | "token"
+            | "secret"
+            | "api_key"
+            | "x_api_key"
+    ) {
+        return true;
+    }
+
+    if normalized_underscore
+        .split('_')
+        .any(|part| matches!(part, "authorization" | "cookie" | "token" | "secret"))
+    {
+        return true;
+    }
+
+    let padded = format!("_{normalized_underscore}_");
+    [
+        "_authorization_",
+        "_auth_token_",
+        "_bearer_token_",
+        "_access_token_",
+        "_refresh_token_",
+        "_session_cookie_",
+        "_client_secret_",
+        "_api_key_",
+        "_x_api_key_",
+    ]
+    .iter()
+    .any(|substring| padded.contains(substring))
+}
+
+fn validation_error(message: impl Into<String>) -> RunnerError {
+    RunnerError::AbiValidation(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        decode_extract_output, decode_match_output, validate_abi_url, validate_extract_output,
+    };
+    use goaria_extractor_sdk::types::{ExtractOutput, ExtractedItemRef};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn strict_output_decoding_rejects_unknown_fields() {
+        assert!(decode_match_output(br#"{"matched":true,"unexpected":1}"#).is_err());
+        assert!(decode_extract_output(br#"{"items":[],"unexpected":1}"#).is_err());
+        assert!(decode_extract_output(
+            br#"{"items":[{"url":"https://example.com/file","unexpected":1}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn abi_url_and_match_output_validation_match_host_boundaries() {
+        for url in [
+            "",
+            "ftp://example.com/file",
+            "https:example.com/file",
+            "https://user:pass@example.com/file",
+            " https://example.com/file",
+            "https://example.com/file\r\nheader: value",
+        ] {
+            assert!(validate_abi_url(url, "input url").is_err());
+        }
+        assert!(decode_match_output(
+            format!(r#"{{"matched":true,"reason":"{}"}}"#, "x".repeat(513)).as_bytes()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn extract_output_validation_matches_host_boundaries() {
+        let invalid_items = [
+            ExtractedItemRef {
+                size_bytes: Some(-1),
+                ..Default::default()
+            },
+            ExtractedItemRef {
+                url: Some("file:///tmp/file.bin".to_string()),
+                ..Default::default()
+            },
+            ExtractedItemRef {
+                metadata: Some(BTreeMap::from([(
+                    "access_token".to_string(),
+                    "redacted".to_string(),
+                )])),
+                ..Default::default()
+            },
+            ExtractedItemRef {
+                metadata: Some(BTreeMap::from([("source".to_string(), "x".repeat(513))])),
+                ..Default::default()
+            },
+        ];
+
+        for item in invalid_items {
+            assert!(validate_extract_output(&ExtractOutput::single(item)).is_err());
         }
     }
 }

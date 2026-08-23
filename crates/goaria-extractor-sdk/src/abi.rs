@@ -37,6 +37,9 @@ pub fn pack_json_response<T: serde::Serialize>(value: &T) -> i64 {
 
 /// Dispatcher for `goaria_match` called by macro generated stub.
 ///
+/// On `wasm32-unknown-unknown`, the default `panic=abort` strategy produces an
+/// `unreachable` trap that the host runtime isolates; it cannot be recovered by `catch_unwind`.
+///
 /// # Safety
 /// The caller must ensure that `ptr` and `len` specify a valid guest memory buffer.
 pub unsafe fn dispatch_match<E: Extractor + Default>(ptr: i32, len: i32) -> i64 {
@@ -69,12 +72,20 @@ pub unsafe fn dispatch_match<E: Extractor + Default>(ptr: i32, len: i32) -> i64 
         }
     };
 
-    let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let extractor = E::default();
-        extractor.match_url(input)
-    }));
+    #[cfg(target_arch = "wasm32")]
+    let output = match E::default().match_url(input) {
+        Ok(output) => output,
+        Err(err) => MatchOutput {
+            matched: false,
+            confidence: None,
+            reason: Some(err.to_string()),
+        },
+    };
 
-    let output = match unwind_result {
+    #[cfg(not(target_arch = "wasm32"))]
+    let output = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        E::default().match_url(input)
+    })) {
         Ok(Ok(output)) => output,
         Ok(Err(err)) => MatchOutput {
             matched: false,
@@ -92,6 +103,9 @@ pub unsafe fn dispatch_match<E: Extractor + Default>(ptr: i32, len: i32) -> i64 
 }
 
 /// Dispatcher for `goaria_extract` called by macro generated stub.
+///
+/// On `wasm32-unknown-unknown`, the default `panic=abort` strategy produces an
+/// `unreachable` trap that the host runtime isolates; it cannot be recovered by `catch_unwind`.
 ///
 /// # Safety
 /// The caller must ensure that `ptr` and `len` specify a valid guest memory buffer.
@@ -113,16 +127,15 @@ pub unsafe fn dispatch_extract<E: Extractor + Default>(ptr: i32, len: i32) -> i6
         }
     };
 
-    let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let extractor = E::default();
-        extractor.extract(input)
-    }));
+    #[cfg(target_arch = "wasm32")]
+    let output = E::default().extract(input).unwrap_or_default();
 
-    let output = match unwind_result {
-        Ok(Ok(output)) => output,
-        Ok(Err(_err)) => ExtractOutput::default(),
-        Err(_) => ExtractOutput::default(),
-    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let output =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| E::default().extract(input)))
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
 
     pack_json_response(&output)
 }

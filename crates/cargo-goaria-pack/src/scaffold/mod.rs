@@ -11,18 +11,23 @@ pub enum ScaffoldError {
     DirectoryNotEmpty(String),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid pack name '{0}': must contain only lowercase letters, digits, hyphens, and underscores")]
+    #[error("invalid pack name '{0}': must be 3-50 lowercase letters, digits, hyphens, or underscores, starting and ending with a letter or digit")]
     InvalidPackName(String),
 }
 
 pub fn validate_pack_name(name: &str) -> Result<(), ScaffoldError> {
-    if name.is_empty() || name.len() > 50 {
+    if name.len() < 3 || name.len() > 50 {
         return Err(ScaffoldError::InvalidPackName(name.to_string()));
     }
     if !name
         .chars()
         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
     {
+        return Err(ScaffoldError::InvalidPackName(name.to_string()));
+    }
+    let bytes = name.as_bytes();
+    let valid_edge = |byte: u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
+    if !valid_edge(bytes[0]) || !valid_edge(bytes[bytes.len() - 1]) {
         return Err(ScaffoldError::InvalidPackName(name.to_string()));
     }
     Ok(())

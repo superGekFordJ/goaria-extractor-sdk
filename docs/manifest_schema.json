@@ -16,13 +16,16 @@
   "properties": {
     "pack_id": {
       "type": "string",
-      "pattern": "^[a-z0-9_-]{1,64}$",
-      "description": "Unique identifier for the extractor pack (lowercase alphanumeric, hyphens, underscores)."
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]*[a-z0-9]$",
+      "description": "Unique identifier for the extractor pack; starts and ends with a lowercase letter or digit."
     },
     "pack_version": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(-[a-zA-Z0-9._-]+)?$",
-      "description": "SemVer version string for the extractor pack."
+      "minLength": 1,
+      "pattern": "^[^/\\\\\\u0000\\u0009\\u000A\\u000B\\u000C\\u000D\\u0020]+$",
+      "description": "Non-empty trimmed version string without ASCII whitespace, NUL, or path separators."
     },
     "abi_version": {
       "type": "integer",
@@ -91,42 +94,42 @@
         "timeout_millis": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 60000,
+          "maximum": 10000,
           "default": 5000,
-          "description": "Execution timeout in milliseconds."
+          "description": "Host wall-clock execution deadline in milliseconds; the local wasmi runner maps it to an approximate fuel budget."
         },
         "max_memory_pages": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 65536,
+          "maximum": 256,
           "default": 32,
           "description": "Maximum memory limit in 64KB pages (32 pages = 2MB)."
         },
         "max_host_calls": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 1000,
+          "maximum": 128,
           "default": 50,
           "description": "Maximum number of host calls permitted during execution."
         },
         "max_response_bytes": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 104857600,
+          "maximum": 10485760,
           "default": 1048576,
           "description": "Maximum size in bytes of host HTTP fetch responses."
         },
         "max_output_items": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 10000,
+          "maximum": 1000,
           "default": 50,
           "description": "Maximum number of extracted items allowed in ExtractOutput."
         },
         "max_output_bytes": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 104857600,
+          "maximum": 1048576,
           "default": 1048576,
           "description": "Maximum total bytes of serialized ExtractOutput JSON."
         }

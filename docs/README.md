@@ -1,70 +1,50 @@
-# GoAria Extractor SDK — Developer Guide & Quickstart
+# GoAria Extractor SDK & Pack Developer Guide
 
-Welcome to the **GoAria Extractor SDK** developer guide. This guide explains how to build, test, sign, and package high-performance WebAssembly extractors for the GoAria ecosystem using Rust or Zig.
-
----
-
-## Table of Contents
-
-1. [3-Minute Quickstart](#1-3-minute-quickstart)
-2. [Rust Extractor Authoring Guide](#2-rust-extractor-authoring-guide)
-3. [Zig Extractor Authoring Guide](#3-zig-extractor-authoring-guide)
-4. [CLI Command Reference (`cargo-goaria-pack`)](#4-cli-command-reference-cargo-goaria-pack)
-5. [Testing & Sandboxing](#5-testing--sandboxing)
-6. [Packaging, Signing & Distribution](#6-packaging-signing--distribution)
-7. [Security Principles & Capabilities](#7-security-principles--capabilities)
+Welcome to the official developer manual for the **GoAria WebAssembly Extractor SDK**. This document covers authoring, debugging, verifying, and packaging link extractors in Rust and Zig.
 
 ---
 
-## 1. 3-Minute Quickstart
+## 1. End-to-End Workflow
 
-### Step 1: Install the SDK CLI
-
-Install `cargo-goaria-pack` from the workspace:
-
-```bash
-cargo install --path crates/cargo-goaria-pack
+```mermaid
+flowchart LR
+    A["cargo goaria-pack new"] --> B["Develop Extractor<br/>(Rust / Zig)"]
+    B --> C["cargo goaria-pack build"]
+    C --> D["cargo goaria-pack check"]
+    D --> E["cargo goaria-pack test"]
+    E --> F["cargo goaria-pack pack"]
+    F --> G[".pack.zip + .lock.json"]
 ```
 
-Verify installation:
-
-```bash
-cargo goaria-pack --help
-```
-
-### Step 2: Scaffold a New Extractor Project
-
-Create a new Rust-based extractor:
-
+### Step 1: Initialize Project
 ```bash
 cargo goaria-pack new my-extractor --lang rust
 cd my-extractor
 ```
 
-*(Or for Zig: `cargo goaria-pack new my-extractor --lang zig`)*
+### Step 2: Configure Permissions (`manifest.json`)
+Declare granular capabilities and domain rules matching your target site.
 
-### Step 3: Run Static Validation & Unit Tests
+### Step 3: Build the WebAssembly Module
+```bash
+cargo goaria-pack build
+```
 
+### Step 4: Run Static Checks and Local Tests
 ```bash
 cargo goaria-pack check
 cargo goaria-pack test
 ```
-
-### Step 4: Execute Against a Target URL
-
-Execute the extractor in the local WebAssembly sandbox with mock broker:
-
+Or interactively test matching and extraction:
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123
 ```
 
-### Step 5: Build & Package for Distribution
-
+### Step 5: Package for Distribution
 ```bash
 cargo goaria-pack pack --out-dir dist
 ```
-
-This compiles the WebAssembly binary, embeds the canonical manifest, generates the Ed25519 cryptographic signature, and produces a deterministic `.pack.zip` and `.lock.json` in `dist/`.
+This verifies the compiled WebAssembly binary, embeds the canonical manifest, generates the Ed25519 cryptographic signature, and produces a deterministic `.pack.zip` and `.lock.json` in `dist/`.
 
 ---
 
@@ -72,7 +52,7 @@ This compiles the WebAssembly binary, embeds the canonical manifest, generates t
 
 ### 2.1 Project Configuration (`Cargo.toml`)
 
-Ensure `crate-type = ["cdylib"]` is configured:
+Ensure `crate-type = ["cdylib", "rlib"]` is configured:
 
 ```toml
 [package]
@@ -81,22 +61,22 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-goaria-extractor-sdk = { path = "../crates/goaria-extractor-sdk" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+goaria-extractor-sdk = "0.1.0"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 ```
 
 ### 2.2 Implementing the `Extractor` Trait
 
-Annotate your extractor struct with `#[goaria_pack]` and `#[derive(Default)]` to automatically wire memory management and C-ABI exports:
+Annotate your extractor struct with `#[goaria_extractor]` and `#[derive(Default)]` to automatically wire memory management and C-ABI exports. The legacy `#[goaria_pack]` spelling remains a compatibility alias for existing packs:
 
 ```rust
 use goaria_extractor_sdk::prelude::*;
 
-#[goaria_pack]
+#[goaria_extractor]
 #[derive(Default)]
 pub struct MyExtractor;
 
@@ -118,12 +98,10 @@ impl Extractor for MyExtractor {
 
     fn extract(&self, input: ExtractInput) -> Result<ExtractOutput, ExtractorError> {
         let broker = HostBroker::new();
-        let api_url = format!("https://api.fixture.invalid/v1/resolve?url={}", urlencoding::encode(&input.url));
+        let api_url = format!("https://api.fixture.invalid/v1/resolve?url={}", input.url);
         let response = broker.fetch_json::<ApiItemResponse>(&HostHTTPFetchRequest {
-            method: "GET".to_string(),
-            url: api_url,
-            broker_policy_ref: "standard_api".to_string(),
-            endpoint_ref: "resolve_item".to_string(),
+            method: Some("GET".to_string()),
+            url: Some(api_url),
             ..Default::default()
         })?;
 
@@ -162,29 +140,17 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSmall,
     });
 
-    const sdk_dep = b.dependency("goaria_sdk", .{
+    const lib = b.addSharedLibrary(.{
+        .name = "payload",
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const sdk_mod = sdk_dep.module("goaria_sdk");
 
-    const wasm = b.addExecutable(.{
-        .name = "my_extractor",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .strip = true,
-            .imports = &.{
-                .{ .name = "goaria_sdk", .module = sdk_mod },
-            },
-        }),
-    });
+    lib.rdynamic = true;
+    lib.entry = .disabled;
 
-    wasm.entry = .disabled;
-    wasm.rdynamic = true;
-
-    b.installArtifact(wasm);
+    b.installArtifact(lib);
 }
 ```
 
@@ -192,35 +158,47 @@ pub fn build(b: *std.Build) void {
 
 ```zig
 const std = @import("std");
-const goaria = @import("goaria_sdk");
 
-pub const MyExtractor = struct {
-    pub fn matchUrl(allocator: std.mem.Allocator, input: goaria.MatchInput) !goaria.MatchOutput {
-        _ = allocator;
-        if (std.mem.startsWith(u8, input.url, "https://share.fixture.invalid/")) {
-            return goaria.MatchOutput.matchedResult()
-                .withConfidence(100)
-                .withReason("matched fixture domain");
-        }
-        return goaria.MatchOutput.unmatchedResult();
-    }
+var allocator = std.heap.page_allocator;
 
-    pub fn extract(allocator: std.mem.Allocator, input: goaria.ExtractInput) !goaria.ExtractOutput {
-        _ = input;
-        const item = goaria.ExtractedItemRef{
-            .id = "artifact-001",
-            .url = "https://download.fixture.invalid/artifact.bin",
-            .filename = "artifact.bin",
-            .size_bytes = 2048,
-            .mime_type = "application/octet-stream",
-        };
+inline fn packResult(ptr: u32, len: u32) i64 {
+    const val = (@as(u64, ptr) << 32) | @as(u64, len);
+    return @bitCast(val);
+}
 
-        return try goaria.ExtractOutput.single(allocator, item);
-    }
-};
+export fn goaria_abi_version() callconv(.c) i32 {
+    return 1;
+}
 
-comptime {
-    goaria.exportExtractor(MyExtractor);
+export fn goaria_alloc(len: i32) callconv(.c) i32 {
+    if (len <= 0) return 0;
+    const slice = allocator.alloc(u8, @intCast(len)) catch return 0;
+    return @intCast(@intFromPtr(slice.ptr));
+}
+
+export fn goaria_free(ptr: i32, len: i32) callconv(.c) void {
+    if (ptr <= 0 or len <= 0) return;
+    const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
+    const slice: []u8 = @as([*]u8, @ptrFromInt(u_ptr))[0..@as(usize, @as(u32, @bitCast(len)))];
+    allocator.free(slice);
+}
+
+export fn goaria_match(ptr: i32, len: i32) callconv(.c) i64 {
+    _ = ptr;
+    _ = len;
+    const result = "{\"matched\":true,\"confidence\":100,\"reason\":\"matches fixture domain\"}";
+    const out_slice = allocator.alloc(u8, result.len) catch return 0;
+    @memcpy(out_slice, result);
+    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
+}
+
+export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
+    _ = ptr;
+    _ = len;
+    const result = "{\"items\":[{\"id\":\"item-001\",\"url\":\"https://fixture.invalid/file.bin\",\"filename\":\"file.bin\"}]}";
+    const out_slice = allocator.alloc(u8, result.len) catch return 0;
+    @memcpy(out_slice, result);
+    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
 }
 ```
 
@@ -235,7 +213,7 @@ comptime {
 | `check` | `cargo goaria-pack check [--project-dir <DIR>] [--wasm <PATH>] [--manifest <PATH>]` | Statically analyzes WASM exports, imports, and validates manifest.json. |
 | `test` | `cargo goaria-pack test [--project-dir <DIR>] [--live] [--fixtures <DIR>]` | Executes unit test fixtures in the local WASM interpreter sandbox. |
 | `run` | `cargo goaria-pack run <URL> [--project-dir <DIR>] [--live] [--auth-profile <ID>] [--auth-secret <SECRET>]` | Runs extractor matching and extraction interactively on a URL. |
-| `keygen` | `cargo goaria-pack keygen [--out-seed <PATH>] [--out-pub <PATH>]` | Generates a new Ed25519 signing keypair. |
+| `keygen` | `cargo goaria-pack keygen --out-seed <NEW_PATH> [--out-pub <PATH>]` | Generates a new Ed25519 signing keypair without printing or overwriting the private seed. |
 | `sign` | `cargo goaria-pack sign --key <KEY_OR_PATH> [--manifest <PATH>] [--out <PATH>]` | Signs manifest.json with an Ed25519 private key. |
 | `pack` | `cargo goaria-pack pack [--project-dir <DIR>] [--out-dir <DIR>] [-k, --sign-key <KEY_OR_PATH>] [--asset-name <NAME>] [--skip-build]` | Builds, checks, signs, and packages deterministic .pack.zip and lockfile. |
 
@@ -246,13 +224,11 @@ comptime {
 ### 5.1 Local Execution (`run`)
 
 Test extraction with a mock broker:
-
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123
 ```
 
 Simulate an authenticated session with an auth profile:
-
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123 \
   --auth-profile default \
@@ -260,20 +236,24 @@ cargo goaria-pack run https://share.fixture.invalid/item/123 \
 ```
 
 Execute with live network access:
-
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123 --live
 ```
+Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Redirects are disabled in the local runner.
 
-### 5.2 Zero-Leak Memory Verification
-The CLI's built-in WASM runtime tracks every byte allocated by `goaria_alloc` and deallocated by `goaria_free`. If an extractor leaks memory or panics, the runner reports a memory leak error with the exact count of uncollected bytes.
+### 5.2 Host-Visible Buffer Ownership Check
+The CLI verifies balanced ownership for ABI buffers visible to the host, including host-created input buffers and guest-returned output buffers. It cannot observe arbitrary allocations inside the guest allocator, so this check is not whole-guest leak detection and does not claim an exact leaked-byte count.
+
+### 5.3 Execution Budget and Panic Isolation
+The production Go/Wazero host treats manifest `timeout_millis` as a cancellable wall-clock deadline. The local `wasmi` runner converts the same value into an approximate fuel/instruction budget for CPU-bound guest code; fuel cannot preempt a blocking host call and is not a wall-clock guarantee. Live HTTP request timeouts are separately capped by the manifest limit.
+
+For Rust `wasm32-unknown-unknown`, the default `panic=abort` behavior emits a WebAssembly `unreachable` trap. `catch_unwind` cannot recover that panic; the host runtime isolates and reports the trap. ABI v1 has no structured `goaria_extract` error envelope, so ordinary returned extractor errors currently map to an empty `ExtractOutput`.
 
 ---
 
 ## 6. Packaging, Signing & Distribution
 
 ### 6.1 Cryptographic Key Generation
-
 ```bash
 cargo goaria-pack keygen \
   --out-seed ~/.goaria/keys/seed.hex \
@@ -281,17 +261,12 @@ cargo goaria-pack keygen \
 ```
 
 ### 6.2 Deterministic Pack Generation
-
 ```bash
 cargo goaria-pack pack \
   --project-dir . \
   --out-dir dist \
   --sign-key ~/.goaria/keys/seed.hex
 ```
-
-Output:
-- `dist/my-extractor-0.1.0.pack.zip`: Deterministic ZIP containing `manifest.json`, `payload.wasm`, and `manifest.sig`.
-- `dist/my-extractor.lock.json`: Companion lock file with cryptographic digests and public key.
 
 ---
 

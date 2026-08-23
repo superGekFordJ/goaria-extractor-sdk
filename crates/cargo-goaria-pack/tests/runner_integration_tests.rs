@@ -1,86 +1,113 @@
-use std::path::Path;
+use std::net::IpAddr;
+use std::path::PathBuf;
 
-use cargo_goaria_pack::manifest::{
+use cargo_goaria_pack::runner::host_broker::is_restricted_ip;
+use cargo_goaria_pack::{
     Capability, DomainRule, Manifest, ManifestError, ResourceLimits, CAPABILITY_AUTH_PROFILE,
-    CAPABILITY_HTTP_FETCH, CAPABILITY_PARSE_WASM,
-};
-use cargo_goaria_pack::runner::{
-    AuthProvider, ExtractorRunner, HostCallBudget, MemoryTracker, MockBroker, UrlPattern,
 };
 use goaria_extractor_sdk::types::{
     AuthSecretKind, HostAuthProfileStatusRequest, HostHTTPFetchRequest,
 };
 
-fn find_fixture_wasm(candidates: &[&str]) -> Option<Vec<u8>> {
-    for c in candidates {
-        let p = Path::new(c);
-        if p.exists() {
-            if let Ok(bytes) = std::fs::read(p) {
-                return Some(bytes);
-            }
-        }
-    }
-    None
+use cargo_goaria_pack::runner::{
+    AuthProvider, ExtractorRunner, HostCallBudget, MemoryTracker, MockBroker, UrlPattern,
+};
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
-fn load_rust_fixture() -> (Option<Vec<u8>>, Manifest) {
+fn cargo_target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(configured) => {
+            let configured = PathBuf::from(configured);
+            if configured.is_absolute() {
+                configured
+            } else {
+                workspace_root().join(configured)
+            }
+        }
+        None => workspace_root().join("target"),
+    }
+}
+
+fn rust_fixture_wasm_path() -> PathBuf {
+    cargo_target_dir()
+        .join("wasm32-unknown-unknown")
+        .join("release")
+        .join("rust_fixture_pack.wasm")
+}
+
+fn load_rust_fixture() -> (Vec<u8>, Manifest) {
+    let wasm_path = rust_fixture_wasm_path();
+    let wasm_bytes = std::fs::read(&wasm_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read Rust fixture WASM '{}': {error}; build it before running tests",
+            wasm_path.display()
+        )
+    });
     let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
     let manifest: Manifest = serde_json::from_str(manifest_str).expect("parse rust manifest");
 
-    let candidates = [
-        "../../target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-        "target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-        "../../../target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-        "../target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-    ];
-    let wasm_bytes = find_fixture_wasm(&candidates);
     (wasm_bytes, manifest)
 }
 
-fn load_zig_fixture() -> (Option<Vec<u8>>, Manifest) {
+fn load_zig_fixture() -> (Vec<u8>, Manifest) {
+    let wasm_path = workspace_root()
+        .join("examples")
+        .join("zig_minimal_pack")
+        .join("zig-out")
+        .join("bin")
+        .join("zig_minimal_pack.wasm");
+    let wasm_bytes = std::fs::read(&wasm_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read Zig fixture WASM '{}': {error}; build it before running tests",
+            wasm_path.display()
+        )
+    });
     let manifest_str = include_str!("../../../examples/zig_minimal_pack/manifest.json");
     let manifest: Manifest = serde_json::from_str(manifest_str).expect("parse zig manifest");
 
-    let candidates = [
-        "../../examples/zig_minimal_pack/zig-out/bin/zig_minimal_pack.wasm",
-        "examples/zig_minimal_pack/zig-out/bin/zig_minimal_pack.wasm",
-        "../../../examples/zig_minimal_pack/zig-out/bin/zig_minimal_pack.wasm",
-        "../examples/zig_minimal_pack/zig-out/bin/zig_minimal_pack.wasm",
-    ];
-    let wasm_bytes = find_fixture_wasm(&candidates);
     (wasm_bytes, manifest)
 }
 
 #[test]
-fn test_manifest_validation() {
-    let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
-    let manifest: Manifest = serde_json::from_str(manifest_str).unwrap();
-    assert!(manifest.validate_runnable().is_ok());
-    assert!(manifest.has_capability(CAPABILITY_PARSE_WASM));
-    assert!(manifest.has_capability(CAPABILITY_HTTP_FETCH));
-    assert!(manifest
-        .allows_url("https://share.fixture.invalid/file/123")
-        .unwrap());
-    assert!(manifest
-        .allows_url("https://sub.fixture.invalid/file/123")
-        .unwrap());
-    assert!(!manifest
-        .allows_url("https://other-domain.invalid/file/123")
-        .unwrap());
+fn test_domain_rule_matching() {
+    let exact_rule = DomainRule {
+        host: "share.fixture.invalid".to_string(),
+        include_subdomains: false,
+    };
+    assert!(exact_rule.matches_host("share.fixture.invalid"));
+    assert!(!exact_rule.matches_host("sub.share.fixture.invalid"));
+    assert!(!exact_rule.matches_host("other.fixture.invalid"));
+
+    let wildcard_rule = DomainRule {
+        host: "fixture.invalid".to_string(),
+        include_subdomains: true,
+    };
+    assert!(wildcard_rule.matches_host("fixture.invalid"));
+    assert!(wildcard_rule.matches_host("sub.fixture.invalid"));
+    assert!(wildcard_rule.matches_host("deep.nested.sub.fixture.invalid"));
+    assert!(!wildcard_rule.matches_host("other-fixture.invalid"));
 }
 
 #[test]
-fn test_manifest_error_conditions() {
+fn test_manifest_validation_logic() {
     let mut manifest = Manifest {
         pack_id: "".to_string(),
         pack_version: "0.1.0".to_string(),
         abi_version: 1,
         description: None,
         capabilities: vec![Capability::parse_wasm()],
-        domains: vec![DomainRule {
+        domains: Some(vec![DomainRule {
             host: "fixture.invalid".to_string(),
-            include_subdomains: true,
-        }],
+            include_subdomains: false,
+        }]),
         domain_policy_refs: None,
         broker_policy_refs: None,
         resource_limits: ResourceLimits::default(),
@@ -106,7 +133,7 @@ fn test_manifest_error_conditions() {
     manifest.capabilities.clear();
     assert_eq!(
         manifest.validate_runnable(),
-        Err(ManifestError::MissingParseWasmCapability)
+        Err(ManifestError::EmptyCapabilities)
     );
 
     manifest.capabilities.push(Capability::parse_wasm());
@@ -118,29 +145,126 @@ fn test_manifest_error_conditions() {
 }
 
 #[test]
+fn test_manifest_deny_unknown_fields() {
+    let json = r#"{
+        "pack_id": "test-pack",
+        "pack_version": "0.1.0",
+        "abi_version": 1,
+        "domains": [{"host": "fixture.invalid"}],
+        "capabilities": ["cap.parse.wasm"],
+        "resource_limits": {
+            "timeout_millis": 5000,
+            "max_memory_pages": 32,
+            "max_host_calls": 50,
+            "max_response_bytes": 1048576,
+            "max_output_items": 50,
+            "max_output_bytes": 1048576
+        },
+        "unknown_extra_field": "disallowed"
+    }"#;
+    let res: Result<Manifest, _> = serde_json::from_str(json);
+    assert!(res.is_err());
+}
+
+#[test]
+fn test_manifest_missing_required_fields_fails() {
+    // Missing capabilities
+    let json_missing_caps = r#"{
+        "pack_id": "test-pack",
+        "pack_version": "0.1.0",
+        "abi_version": 1,
+        "domains": [{"host": "fixture.invalid"}],
+        "resource_limits": {
+            "timeout_millis": 5000,
+            "max_memory_pages": 32,
+            "max_host_calls": 50,
+            "max_response_bytes": 1048576,
+            "max_output_items": 50,
+            "max_output_bytes": 1048576
+        }
+    }"#;
+    assert!(serde_json::from_str::<Manifest>(json_missing_caps).is_err());
+
+    // Missing resource_limits
+    let json_missing_limits = r#"{
+        "pack_id": "test-pack",
+        "pack_version": "0.1.0",
+        "abi_version": 1,
+        "domains": [{"host": "fixture.invalid"}],
+        "capabilities": ["cap.parse.wasm"]
+    }"#;
+    assert!(serde_json::from_str::<Manifest>(json_missing_limits).is_err());
+
+    // Missing field inside resource_limits
+    let json_missing_subfield = r#"{
+        "pack_id": "test-pack",
+        "pack_version": "0.1.0",
+        "abi_version": 1,
+        "domains": [{"host": "fixture.invalid"}],
+        "capabilities": ["cap.parse.wasm"],
+        "resource_limits": {
+            "timeout_millis": 5000,
+            "max_memory_pages": 32,
+            "max_host_calls": 50
+        }
+    }"#;
+    assert!(serde_json::from_str::<Manifest>(json_missing_subfield).is_err());
+}
+
+#[test]
+fn test_is_restricted_ip() {
+    // IPv4 Restricted
+    assert!(is_restricted_ip("127.0.0.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("10.0.0.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("172.16.0.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("192.168.1.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("169.254.1.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("100.64.0.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("192.0.2.1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("0.0.0.0".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("0.1.2.3".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("224.0.0.1".parse::<IpAddr>().unwrap()));
+
+    // IPv6 Restricted
+    assert!(is_restricted_ip("::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("::".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("fe80::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("fc00::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("64:ff9b::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("64:ff9b:1::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("100::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("2001::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("2001:1ff::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("2001:db8::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip("2002::1".parse::<IpAddr>().unwrap()));
+    assert!(is_restricted_ip(
+        "::ffff:127.0.0.1".parse::<IpAddr>().unwrap()
+    ));
+
+    // Public IPs (not restricted)
+    assert!(!is_restricted_ip("8.8.8.8".parse::<IpAddr>().unwrap()));
+    assert!(!is_restricted_ip("1.1.1.1".parse::<IpAddr>().unwrap()));
+    assert!(!is_restricted_ip(
+        "2606:4700:4700::1111".parse::<IpAddr>().unwrap()
+    ));
+}
+
+#[test]
 fn test_mock_broker_matching() {
     let mut broker = MockBroker::new();
-    broker.add_mock_json(
-        UrlPattern::Exact("https://share.fixture.invalid/api/item/42".to_string()),
-        200,
-        &serde_json::json!({ "id": 42, "title": "Test Item" }),
-    );
+    broker.add_rule(cargo_goaria_pack::runner::MockBrokerRule {
+        pattern: UrlPattern::Exact("https://share.fixture.invalid/api/item/42".to_string()),
+        status_code: 200,
+        headers: Default::default(),
+        body: serde_json::to_vec(&serde_json::json!({ "id": 42, "title": "Test Item" })).unwrap(),
+    });
 
-    broker.add_mock_response(
-        UrlPattern::Prefix("https://share.fixture.invalid/static/".to_string()),
-        200,
-        Default::default(),
-        b"raw-data".to_vec(),
-    );
-
-    broker.add_mock_json(
-        UrlPattern::EndpointRef {
-            policy_ref: "pol-1".to_string(),
-            endpoint_ref: "ep-1".to_string(),
-        },
-        200,
-        &serde_json::json!({ "status": "ok" }),
-    );
+    broker.add_rule(cargo_goaria_pack::runner::MockBrokerRule {
+        pattern: UrlPattern::Prefix("https://share.fixture.invalid/static/".to_string()),
+        status_code: 200,
+        headers: Default::default(),
+        body: b"raw-data".to_vec(),
+    });
 
     let req_exact = HostHTTPFetchRequest {
         url: Some("https://share.fixture.invalid/api/item/42".to_string()),
@@ -162,16 +286,6 @@ fn test_mock_broker_matching() {
         .resolve(&req_prefix)
         .expect("should resolve prefix match");
     assert!(resp_prefix.ok);
-
-    let req_endpoint = HostHTTPFetchRequest {
-        broker_policy_ref: Some("pol-1".to_string()),
-        endpoint_ref: Some("ep-1".to_string()),
-        ..Default::default()
-    };
-    let resp_ep = broker
-        .resolve(&req_endpoint)
-        .expect("should resolve endpoint match");
-    assert!(resp_ep.ok);
 
     let req_unmatched = HostHTTPFetchRequest {
         url: Some("https://share.fixture.invalid/not-found".to_string()),
@@ -235,6 +349,10 @@ fn test_memory_tracker_leak_detection() {
 
     assert!(tracker.check_leaks().is_err());
 
+    assert!(tracker.record_free(0x1000, 63).is_err());
+    assert_eq!(tracker.active_allocations_count(), 2);
+    assert_eq!(tracker.active_bytes(), 192);
+
     tracker.record_free(0x1000, 64).unwrap();
     assert_eq!(tracker.active_allocations_count(), 1);
     assert_eq!(tracker.active_bytes(), 128);
@@ -250,15 +368,7 @@ fn test_memory_tracker_leak_detection() {
 
 #[test]
 fn test_rust_fixture_wasm_runner() {
-    let (wasm_opt, manifest) = load_rust_fixture();
-    let wasm_bytes = match wasm_opt {
-        Some(b) => b,
-        None => {
-            println!("Skipping test_rust_fixture_wasm_runner: wasm binary not found");
-            return;
-        }
-    };
-
+    let (wasm_bytes, manifest) = load_rust_fixture();
     let runner = ExtractorRunner::new(&wasm_bytes, manifest).expect("instantiate rust runner");
 
     // 1. Check ABI Version
@@ -295,15 +405,7 @@ fn test_rust_fixture_wasm_runner() {
 
 #[test]
 fn test_zig_fixture_wasm_runner() {
-    let (wasm_opt, manifest) = load_zig_fixture();
-    let wasm_bytes = match wasm_opt {
-        Some(b) => b,
-        None => {
-            println!("Skipping test_zig_fixture_wasm_runner: wasm binary not found");
-            return;
-        }
-    };
-
+    let (wasm_bytes, manifest) = load_zig_fixture();
     let runner = ExtractorRunner::new(&wasm_bytes, manifest).expect("instantiate zig runner");
 
     // 1. Check ABI Version

@@ -57,8 +57,8 @@ The guest MUST export allocation and deallocation functions so the host can safe
 - `goaria_alloc(len: i32) -> i32`: Allocates `len` contiguous bytes in the guest heap and returns the starting pointer. Returns `0` if allocation fails.
 - `goaria_free(ptr: i32, len: i32)`: Releases memory previously allocated via `goaria_alloc` or returned by guest functions.
 
-### 2.4 Zero-Leak Memory Lifecycle
-The memory lifecycle strictly prevents memory leaks across host-guest boundaries:
+### 2.4 ABI Buffer Ownership Lifecycle
+The ABI defines deterministic ownership transfer for buffers crossing the host/guest boundary:
 1. **Host-to-Guest Input**:
    - Host calls `goaria_alloc(len)` to obtain `ptr`.
    - Host writes serialized JSON input into `memory[ptr : ptr+len]`.
@@ -70,6 +70,13 @@ The memory lifecycle strictly prevents memory leaks across host-guest boundaries
    - Guest returns packed `(ptr << 32) | len`.
    - Host reads `memory[ptr : ptr+len]`.
    - Host immediately invokes `goaria_free(ptr, len)` to reclaim guest heap memory.
+
+The local runner verifies ownership balance only for buffers visible to the host. It cannot observe arbitrary guest allocator activity and therefore does not claim whole-guest leak detection or exact leaked-byte accounting.
+
+### 2.5 Rust Panic and Error Behavior
+Rust `wasm32-unknown-unknown` builds use `panic=abort` by default. A panic in `Default::default()`, `match_url`, or `extract` emits a WebAssembly `unreachable` trap; `catch_unwind` cannot recover it. The Go/Wazero host and local runner isolate and report that trap without compromising the host process.
+
+ABI v1 has no structured extractor-error envelope for `goaria_extract`. A normal `ExtractorError` is represented by the Rust SDK as an empty `ExtractOutput`; plugin authors must reserve panics for unrecoverable bugs and should return explicit errors for expected failures.
 
 ---
 
@@ -296,13 +303,15 @@ Packs declare required capabilities in `manifest.json`. The host strictly checks
 Guest extractors MUST NOT receive raw credentials (passwords, private tokens, cookies, auth headers). All credential injection is performed exclusively by the GoAria host runtime when executing downstream download tasks or brokered HTTP requests.
 
 ### 6.3 Resource Limits
-Extractors operate within strict deterministic resource boundaries defined in `resource_limits`:
-- `timeout_millis`: Maximum execution time per invocation (default `5000` ms).
-- `max_memory_pages`: WebAssembly memory page cap (default `32` pages = 2 MB).
-- `max_host_calls`: Maximum broker host calls permitted per invocation (default `50`).
-- `max_response_bytes`: Maximum HTTP response size permitted (default `1048576` bytes = 1 MB).
-- `max_output_items`: Maximum number of items in `ExtractOutput` (default `50`).
-- `max_output_bytes`: Maximum serialized `ExtractOutput` JSON byte size (default `1048576` bytes = 1 MB).
+Extractors operate within resource boundaries defined in `resource_limits`:
+- `timeout_millis`: Host wall-clock deadline per invocation (default `5000`, maximum `10000` ms). The local `wasmi` runner maps this value to an approximate fuel/instruction budget; fuel is not a wall-clock timer and cannot preempt a blocking host call.
+- `max_memory_pages`: WebAssembly memory page cap (default `32`, maximum `256` pages).
+- `max_host_calls`: Maximum broker host calls permitted per invocation (default `50`, maximum `128`).
+- `max_response_bytes`: Maximum HTTP response size permitted (default `1048576`, maximum `10485760` bytes).
+- `max_output_items`: Maximum number of items in `ExtractOutput` (default `50`, maximum `1000`).
+- `max_output_bytes`: Maximum serialized `ExtractOutput` JSON byte size (default and maximum `1048576` bytes).
+
+The production Go/Wazero host enforces the wall-clock deadline with cancellation. Local CLI fuel exhaustion is a deterministic safety approximation for CPU-bound guest code, not an equivalence claim for elapsed time.
 
 ---
 

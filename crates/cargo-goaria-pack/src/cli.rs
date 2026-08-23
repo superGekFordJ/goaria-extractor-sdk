@@ -147,8 +147,8 @@ pub struct RunArgs {
 
 #[derive(Args, Debug)]
 pub struct KeygenArgs {
-    /// Path to write private signing key seed hex (optional)
-    #[arg(long, value_name = "PATH")]
+    /// New path for the private signing key seed hex; existing files are never overwritten
+    #[arg(long, value_name = "PATH", required = true)]
     pub out_seed: Option<PathBuf>,
 
     /// Path to write public key hex (optional)

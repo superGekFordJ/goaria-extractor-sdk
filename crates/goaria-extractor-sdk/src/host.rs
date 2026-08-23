@@ -35,7 +35,7 @@ pub fn raw_http_fetch(request_json_bytes: &[u8]) -> Result<GuestBuffer, Extracto
     }
 
     let (resp_ptr, resp_len) = unpack_result(result_packed as u64);
-    GuestBuffer::from_raw(resp_ptr as i32, resp_len as i32).ok_or_else(|| {
+    unsafe { GuestBuffer::from_host_raw(resp_ptr, resp_len) }.ok_or_else(|| {
         ExtractorError::HostError {
             error_code: "invalid_response_buffer".to_string(),
             message: "host returned invalid response buffer".to_string(),
@@ -57,7 +57,7 @@ pub fn raw_auth_profile_status(request_json_bytes: &[u8]) -> Result<GuestBuffer,
     }
 
     let (resp_ptr, resp_len) = unpack_result(result_packed as u64);
-    GuestBuffer::from_raw(resp_ptr as i32, resp_len as i32).ok_or_else(|| {
+    unsafe { GuestBuffer::from_host_raw(resp_ptr, resp_len) }.ok_or_else(|| {
         ExtractorError::HostError {
             error_code: "invalid_response_buffer".to_string(),
             message: "host returned invalid response buffer".to_string(),

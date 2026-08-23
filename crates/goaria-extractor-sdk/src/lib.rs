@@ -7,5 +7,5 @@ pub mod prelude;
 pub mod traits;
 pub mod types;
 
-pub use goaria_extractor_macro::goaria_pack;
+pub use goaria_extractor_macro::{goaria_extractor, goaria_pack};
 pub use prelude::*;

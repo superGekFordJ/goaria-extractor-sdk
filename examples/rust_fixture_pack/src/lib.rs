@@ -1,7 +1,7 @@
 use goaria_extractor_sdk::prelude::*;
 use std::collections::BTreeMap;
 
-#[goaria_pack]
+#[goaria_extractor]
 #[derive(Default)]
 pub struct RustFixtureExtractor;
 

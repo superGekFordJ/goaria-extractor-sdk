@@ -15,6 +15,10 @@ pub enum CryptoError {
     InvalidSignature(String),
     #[error("signature verification failed")]
     SignatureVerificationFailed,
+    #[error("private seed output path is required; pass --out-seed <PATH>")]
+    MissingPrivateSeedOutput,
+    #[error("private seed and public key output paths must be different")]
+    ConflictingKeyOutputPaths,
     #[error("I/O error reading key: {0}")]
     Io(#[from] std::io::Error),
 }

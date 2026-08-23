@@ -1,4 +1,4 @@
-use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store};
+use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, StoreLimits};
 
 use goaria_extractor_sdk::abi::pack_result;
 use goaria_extractor_sdk::types::{HostAuthProfileStatusRequest, HostHTTPFetchRequest};
@@ -11,6 +11,12 @@ use crate::runner::limits::{
 };
 use crate::runner::memory_tracker::MemoryTracker;
 
+const FUEL_UNITS_PER_TIMEOUT_MILLI: u64 = 1_000_000;
+
+fn approximate_instruction_budget(timeout_millis: u64) -> u64 {
+    timeout_millis.saturating_mul(FUEL_UNITS_PER_TIMEOUT_MILLI)
+}
+
 /// Mutable state passed into the wasmi Store.
 pub struct HostState {
     pub manifest: Manifest,
@@ -18,6 +24,7 @@ pub struct HostState {
     pub broker: HostBroker,
     pub auth_provider: AuthProvider,
     pub memory_tracker: MemoryTracker,
+    pub limits: StoreLimits,
 }
 
 /// In-process WebAssembly Execution Sandbox.
@@ -29,7 +36,7 @@ pub struct WasmEngine {
 impl WasmEngine {
     pub fn new(wasm_bytes: &[u8]) -> Result<Self, wasmi::Error> {
         let mut config = Config::default();
-        config.consume_fuel(false);
+        config.consume_fuel(true);
 
         let engine = Engine::new(&config);
         let module = Module::new(&engine, wasm_bytes)?;
@@ -37,13 +44,21 @@ impl WasmEngine {
         Ok(Self { engine, module })
     }
 
-    /// Instantiate module and execute an operation with the given host state.
+    /// Instantiate a module with a fuel-based instruction budget and execute one operation.
+    /// Fuel approximates CPU work for local testing; it is not a wall-clock deadline and cannot
+    /// preempt a blocking host call.
     pub fn instantiate_and_run<R>(
         &self,
         state: HostState,
         run_fn: impl FnOnce(&mut Store<HostState>, Instance, Memory) -> Result<R, wasmi::Error>,
     ) -> Result<(R, HostState), wasmi::Error> {
         let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limits);
+
+        let instruction_budget =
+            approximate_instruction_budget(store.data().manifest.resource_limits.timeout_millis);
+        store.set_fuel(instruction_budget)?;
+
         let mut linker = Linker::new(&self.engine);
 
         // Define host import: goaria_host.http_fetch
@@ -200,5 +215,17 @@ impl WasmEngine {
         let final_state = store.into_data();
 
         Ok((result, final_state))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::approximate_instruction_budget;
+
+    #[test]
+    fn instruction_budget_scales_without_a_hidden_minimum() {
+        assert_eq!(approximate_instruction_budget(1), 1_000_000);
+        assert_eq!(approximate_instruction_budget(10), 10_000_000);
+        assert_eq!(approximate_instruction_budget(u64::MAX), u64::MAX);
     }
 }

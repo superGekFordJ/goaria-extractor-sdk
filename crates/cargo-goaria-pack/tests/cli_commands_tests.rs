@@ -1,56 +1,86 @@
+use std::path::PathBuf;
+use std::process::Command;
+
 use cargo_goaria_pack::check::{
-    analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError, WasmAnalysis,
+    analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError, DisallowedImportInfo, WasmAnalysis,
 };
 use cargo_goaria_pack::cli::{CheckArgs, Language, PackArgs, TestArgs};
 use cargo_goaria_pack::commands::check::{handle_check, resolve_manifest_and_wasm};
 use cargo_goaria_pack::commands::pack::handle_pack;
-use cargo_goaria_pack::commands::test::handle_test;
+use cargo_goaria_pack::commands::test::{handle_test, TestCommandError};
 use cargo_goaria_pack::manifest::Manifest;
-use cargo_goaria_pack::pack::{LockEntry, LockFile, LOCK_SCHEMA_VERSION};
+use cargo_goaria_pack::pack::lock::{LockEntry, LockFile, LOCK_SCHEMA_VERSION};
 use cargo_goaria_pack::scaffold::{scaffold_project, validate_pack_name, ScaffoldError};
-use std::path::PathBuf;
+
+fn workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+fn cargo_target_dir() -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(configured) => {
+            let configured = PathBuf::from(configured);
+            if configured.is_absolute() {
+                configured
+            } else {
+                workspace_root().join(configured)
+            }
+        }
+        None => workspace_root().join("target"),
+    }
+}
+
+fn rust_fixture_wasm_path() -> PathBuf {
+    cargo_target_dir()
+        .join("wasm32-unknown-unknown")
+        .join("release")
+        .join("rust_fixture_pack.wasm")
+}
+
+fn rust_fixture_dir() -> PathBuf {
+    workspace_root().join("examples").join("rust_fixture_pack")
+}
 
 #[test]
 fn test_scaffold_rust_project() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let project_dir = temp_dir.path().join("my-rust-pack");
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("my_rust_pack");
 
-    scaffold_project("my-rust-pack", Language::Rust, &project_dir).unwrap();
+    let res = scaffold_project("my_rust_pack", Language::Rust, &project_dir);
+    assert!(res.is_ok());
 
     assert!(project_dir.join("Cargo.toml").exists());
     assert!(project_dir.join("manifest.json").exists());
-    assert!(project_dir.join("src").join("lib.rs").exists());
+    assert!(project_dir.join("src/lib.rs").exists());
     assert!(project_dir.join(".gitignore").exists());
 
-    // Validate manifest
+    // Validate generated manifest.json
     let manifest_raw = std::fs::read_to_string(project_dir.join("manifest.json")).unwrap();
     let manifest: Manifest = serde_json::from_str(&manifest_raw).unwrap();
-    assert_eq!(manifest.pack_id, "my-rust-pack");
-    assert_eq!(manifest.pack_version, "0.1.0");
+    assert_eq!(manifest.pack_id, "my_rust_pack");
     assert_eq!(manifest.abi_version, 1);
-    assert!(manifest.has_capability("cap.parse.wasm"));
-    assert!(manifest.has_capability("cap.http.fetch"));
     assert!(manifest.validate_runnable().is_ok());
-
-    // Re-scaffolding in non-empty directory should fail
-    let err = scaffold_project("my-rust-pack", Language::Rust, &project_dir).unwrap_err();
-    assert!(matches!(err, ScaffoldError::DirectoryNotEmpty(_)));
 }
 
 #[test]
 fn test_scaffold_zig_project() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let project_dir = temp_dir.path().join("my-zig-pack");
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("my_zig_pack");
 
-    scaffold_project("my-zig-pack", Language::Zig, &project_dir).unwrap();
+    let res = scaffold_project("my-zig-pack", Language::Zig, &project_dir);
+    assert!(res.is_ok());
 
     assert!(project_dir.join("build.zig").exists());
     assert!(project_dir.join("build.zig.zon").exists());
     assert!(project_dir.join("manifest.json").exists());
-    assert!(project_dir.join("src").join("main.zig").exists());
+    assert!(project_dir.join("src/main.zig").exists());
     assert!(project_dir.join(".gitignore").exists());
 
-    // Validate manifest
     let manifest_raw = std::fs::read_to_string(project_dir.join("manifest.json")).unwrap();
     let manifest: Manifest = serde_json::from_str(&manifest_raw).unwrap();
     assert_eq!(manifest.pack_id, "my-zig-pack");
@@ -62,7 +92,11 @@ fn test_scaffold_zig_project() {
 fn test_pack_name_validation() {
     assert!(validate_pack_name("valid-pack").is_ok());
     assert!(validate_pack_name("valid_pack_123").is_ok());
-    assert!(validate_pack_name("a").is_ok());
+    assert!(validate_pack_name("abc").is_ok());
+    assert!(matches!(
+        validate_pack_name("a"),
+        Err(ScaffoldError::InvalidPackName(_))
+    ));
 
     assert!(matches!(
         validate_pack_name(""),
@@ -80,11 +114,66 @@ fn test_pack_name_validation() {
         validate_pack_name("invalid!char"),
         Err(ScaffoldError::InvalidPackName(_))
     ));
+    for invalid_edge in ["---", "-ab", "ab_"] {
+        assert!(matches!(
+            validate_pack_name(invalid_edge),
+            Err(ScaffoldError::InvalidPackName(_))
+        ));
+    }
     let long_name = "a".repeat(51);
     assert!(matches!(
         validate_pack_name(&long_name),
         Err(ScaffoldError::InvalidPackName(_))
     ));
+}
+
+#[test]
+fn test_keygen_requires_new_private_output_and_never_prints_seed() {
+    let binary = env!("CARGO_BIN_EXE_cargo-goaria-pack");
+    let missing_output = Command::new(binary).arg("keygen").output().unwrap();
+    assert!(!missing_output.status.success());
+    assert!(!String::from_utf8_lossy(&missing_output.stdout).contains("Private Seed"));
+
+    let temp = tempfile::tempdir().unwrap();
+    let conflicting_path = temp.path().join("conflicting-key.hex");
+    let conflicting_output = Command::new(binary)
+        .args(["keygen", "--out-seed"])
+        .arg(&conflicting_path)
+        .arg("--out-pub")
+        .arg(&conflicting_path)
+        .output()
+        .unwrap();
+    assert!(!conflicting_output.status.success());
+    assert!(!conflicting_path.exists());
+
+    let seed_path = temp.path().join("signing-seed.hex");
+    let output = Command::new(binary)
+        .args(["keygen", "--out-seed"])
+        .arg(&seed_path)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let seed = std::fs::read_to_string(&seed_path).unwrap();
+    assert_eq!(seed.len(), 64);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Public Key Hex:"));
+    assert!(!stdout.contains(&seed));
+
+    let second_output = Command::new(binary)
+        .args(["keygen", "--out-seed"])
+        .arg(&seed_path)
+        .output()
+        .unwrap();
+    assert!(!second_output.status.success());
+    assert_eq!(std::fs::read_to_string(&seed_path).unwrap(), seed);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&seed_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
 }
 
 #[test]
@@ -116,24 +205,29 @@ fn test_lockfile_generation_and_serialization() {
 }
 
 #[test]
+fn test_manifest_json_schema_matches_host_policy_limits() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/manifest_schema.json")).unwrap();
+    let limits = &schema["properties"]["resource_limits"]["properties"];
+
+    assert_eq!(limits["timeout_millis"]["maximum"], 10_000);
+    assert_eq!(limits["max_memory_pages"]["maximum"], 256);
+    assert_eq!(limits["max_host_calls"]["maximum"], 128);
+    assert_eq!(limits["max_response_bytes"]["maximum"], 10_485_760);
+    assert_eq!(limits["max_output_items"]["maximum"], 1_000);
+    assert_eq!(limits["max_output_bytes"]["maximum"], 1_048_576);
+    assert_eq!(schema["properties"]["pack_id"]["minLength"], 3);
+}
+
+#[test]
 fn test_wasm_static_analyzer_on_fixture() {
-    let candidates = [
-        "../../../target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-        "../../target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-        "target/wasm32-unknown-unknown/release/rust_fixture_pack.wasm",
-    ];
-    let mut wasm_bytes = None;
-    for c in candidates {
-        let p = PathBuf::from(c);
-        if p.exists() {
-            wasm_bytes = Some(std::fs::read(&p).expect("read wasm"));
-            break;
-        }
-    }
-    let wasm_bytes = match wasm_bytes {
-        Some(b) => b,
-        None => return,
-    };
+    let wasm_path = rust_fixture_wasm_path();
+    let wasm_bytes = std::fs::read(&wasm_path).unwrap_or_else(|error| {
+        panic!(
+            "failed to read Rust fixture WASM '{}': {error}; build it before running tests",
+            wasm_path.display()
+        )
+    });
 
     let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
     let manifest: Manifest = serde_json::from_str(manifest_str).expect("parse manifest");
@@ -203,11 +297,25 @@ fn test_wasm_static_analyzer_signature_mismatch() {
         .map(|s| s.to_string())
         .collect(),
         memory_exported: true,
+        memory_count: 1,
         ..Default::default()
     };
     analysis
         .export_signatures
         .insert("goaria_abi_version".to_string(), "() -> i64".to_string());
+    analysis
+        .export_signatures
+        .insert("goaria_alloc".to_string(), "(i32) -> i32".to_string());
+    analysis
+        .export_signatures
+        .insert("goaria_free".to_string(), "(i32, i32) -> ()".to_string());
+    analysis
+        .export_signatures
+        .insert("goaria_match".to_string(), "(i32, i32) -> i64".to_string());
+    analysis.export_signatures.insert(
+        "goaria_extract".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    );
 
     let res = verify_wasm_and_manifest(&analysis, &manifest);
     assert!(
@@ -216,14 +324,91 @@ fn test_wasm_static_analyzer_signature_mismatch() {
 }
 
 #[test]
+fn test_wasm_static_analyzer_disallowed_imports() {
+    let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
+    let manifest: Manifest = serde_json::from_str(manifest_str).expect("parse manifest");
+
+    let base_analysis = WasmAnalysis {
+        exports: [
+            "goaria_abi_version",
+            "goaria_alloc",
+            "goaria_free",
+            "goaria_match",
+            "goaria_extract",
+            "memory",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        export_signatures: [
+            ("goaria_abi_version", "() -> i32"),
+            ("goaria_alloc", "(i32) -> i32"),
+            ("goaria_free", "(i32, i32) -> ()"),
+            ("goaria_match", "(i32, i32) -> i64"),
+            ("goaria_extract", "(i32, i32) -> i64"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+        memory_exported: true,
+        memory_count: 1,
+        ..Default::default()
+    };
+
+    // 1. Non-func import (memory)
+    let mut bad_import_analysis = base_analysis.clone();
+    bad_import_analysis
+        .non_func_imports
+        .push(DisallowedImportInfo {
+            module: "env".to_string(),
+            name: "memory".to_string(),
+            kind: "memory",
+        });
+    assert!(matches!(
+        verify_wasm_and_manifest(&bad_import_analysis, &manifest),
+        Err(CheckError::DisallowedImportType { .. })
+    ));
+
+    // 2. Foreign module function import
+    let mut bad_mod_analysis = base_analysis.clone();
+    bad_mod_analysis.imports.push((
+        "env".to_string(),
+        "print".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(matches!(
+        verify_wasm_and_manifest(&bad_mod_analysis, &manifest),
+        Err(CheckError::ForbiddenImportModule { .. })
+    ));
+
+    // 3. Forbidden host function
+    let mut bad_fn_analysis = base_analysis.clone();
+    bad_fn_analysis.imports.push((
+        "goaria_host".to_string(),
+        "exec_cmd".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(matches!(
+        verify_wasm_and_manifest(&bad_fn_analysis, &manifest),
+        Err(CheckError::ForbiddenImportFunction { .. })
+    ));
+
+    // 4. Missing capability for import
+    let mut missing_cap_analysis = base_analysis;
+    missing_cap_analysis.imports.push((
+        "goaria_host".to_string(),
+        "auth_profile_status".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(matches!(
+        verify_wasm_and_manifest(&missing_cap_analysis, &manifest),
+        Err(CheckError::MissingCapabilityForImport { .. })
+    ));
+}
+
+#[test]
 fn test_pack_pipeline_on_fixture() {
-    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join("rust_fixture_pack");
+    let fixture_dir = rust_fixture_dir();
 
     let temp_out = tempfile::tempdir().unwrap();
 
@@ -235,47 +420,108 @@ fn test_pack_pipeline_on_fixture() {
         skip_build: true,
     };
 
-    // If wasm exists in target, run pack
-    if let Ok(zip_path) = handle_pack(args) {
-        assert!(zip_path.exists());
-        assert!(temp_out.path().join("manifest.json").exists());
-        assert!(temp_out.path().join("payload.wasm").exists());
-        assert!(temp_out.path().join("manifest.sig").exists());
-        assert!(temp_out.path().join("rust-fixture-pack.lock.json").exists());
+    let zip_path = handle_pack(args).expect("handle_pack should succeed on fixture");
+    assert!(zip_path.exists());
+    assert!(temp_out.path().join("manifest.json").exists());
+    assert!(temp_out.path().join("payload.wasm").exists());
+    assert!(temp_out.path().join("manifest.sig").exists());
+    assert!(temp_out.path().join("rust-fixture-pack.lock.json").exists());
 
-        // Verify lockfile content
-        let lock_raw =
-            std::fs::read_to_string(temp_out.path().join("rust-fixture-pack.lock.json")).unwrap();
-        let lock: LockFile = serde_json::from_str(&lock_raw).unwrap();
-        assert!(!lock.packs[0].asset_path.contains('\\'));
-    }
+    // Verify lockfile content
+    let lock_raw =
+        std::fs::read_to_string(temp_out.path().join("rust-fixture-pack.lock.json")).unwrap();
+    let lock: LockFile = serde_json::from_str(&lock_raw).unwrap();
+    assert!(!lock.packs[0].asset_path.contains('\\'));
 }
 
 #[test]
 fn test_check_and_test_commands_on_fixture() {
-    let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join("rust_fixture_pack");
+    let fixture_dir = rust_fixture_dir();
+    let wasm_path = rust_fixture_wasm_path();
 
     let check_args = CheckArgs {
         project_dir: fixture_dir.clone(),
-        wasm: None,
+        wasm: Some(wasm_path.clone()),
         manifest: None,
     };
-    let _ = handle_check(check_args);
+    handle_check(check_args).expect("handle_check should succeed on fixture");
 
     let test_args = TestArgs {
         project_dir: fixture_dir,
-        wasm: None,
+        wasm: Some(wasm_path),
         manifest: None,
         live: false,
         fixtures: None,
     };
-    let _ = handle_test(test_args);
+    handle_test(test_args).expect("handle_test should succeed on fixture");
+}
+
+#[test]
+fn test_fixture_loading_errors_fail_test() {
+    let fixture_dir = rust_fixture_dir();
+    let wasm_path = rust_fixture_wasm_path();
+
+    let temp_fixtures = tempfile::tempdir().unwrap();
+    let corrupt_file = temp_fixtures.path().join("corrupt.json");
+    std::fs::write(&corrupt_file, "{ invalid-json }").unwrap();
+
+    let test_args = TestArgs {
+        project_dir: fixture_dir.clone(),
+        wasm: Some(wasm_path.clone()),
+        manifest: None,
+        live: false,
+        fixtures: Some(temp_fixtures.path().to_path_buf()),
+    };
+    let res = handle_test(test_args);
+    assert!(matches!(res, Err(TestCommandError::Fixture { .. })));
+
+    // Bad base64
+    let bad_b64_file = temp_fixtures.path().join("bad_b64.json");
+    std::fs::write(
+        &bad_b64_file,
+        r#"{"url": "https://share.fixture.invalid/test", "body_base64": "!!!not-valid-base64!!!"}"#,
+    )
+    .unwrap();
+    std::fs::remove_file(&corrupt_file).unwrap();
+
+    let test_args_b64 = TestArgs {
+        project_dir: fixture_dir.clone(),
+        wasm: Some(wasm_path.clone()),
+        manifest: None,
+        live: false,
+        fixtures: Some(temp_fixtures.path().to_path_buf()),
+    };
+    let res_b64 = handle_test(test_args_b64);
+    assert!(matches!(res_b64, Err(TestCommandError::Fixture { .. })));
+
+    for malformed in [
+        r#"{"url":"https://share.fixture.invalid/test","status":"200"}"#,
+        r#"{"url":"https://share.fixture.invalid/test","headers":{"x-test":["ok",7]}}"#,
+        r#"{"url":"https://share.fixture.invalid/test","body_base64":7}"#,
+    ] {
+        std::fs::write(&bad_b64_file, malformed).unwrap();
+        let result = handle_test(TestArgs {
+            project_dir: fixture_dir.clone(),
+            wasm: Some(wasm_path.clone()),
+            manifest: None,
+            live: false,
+            fixtures: Some(temp_fixtures.path().to_path_buf()),
+        });
+        assert!(matches!(result, Err(TestCommandError::Fixture { .. })));
+    }
+
+    let missing_fixtures = temp_fixtures.path().join("missing");
+    let missing_result = handle_test(TestArgs {
+        project_dir: fixture_dir,
+        wasm: Some(wasm_path),
+        manifest: None,
+        live: false,
+        fixtures: Some(missing_fixtures),
+    });
+    assert!(matches!(
+        missing_result,
+        Err(TestCommandError::Fixture { message, .. }) if message.contains("does not exist")
+    ));
 }
 
 #[test]

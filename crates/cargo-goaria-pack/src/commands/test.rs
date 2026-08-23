@@ -14,92 +14,224 @@ pub enum TestCommandError {
     Runner(#[from] RunnerError),
     #[error("check resolution error: {0}")]
     Check(#[from] crate::check::CheckError),
+    #[error("fixture error in '{path}': {message}")]
+    Fixture { path: String, message: String },
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("test failure: {0}")]
     TestFailed(String),
 }
 
-fn load_fixtures_from_dir(dir: &Path, broker: &mut MockBroker) {
-    if !dir.exists() || !dir.is_dir() {
-        return;
+fn load_fixtures_from_dir(dir: &Path, broker: &mut MockBroker) -> Result<(), TestCommandError> {
+    if !dir.exists() {
+        return Err(TestCommandError::Fixture {
+            path: dir.display().to_string(),
+            message: "fixtures directory does not exist".to_string(),
+        });
     }
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        parse_and_add_fixture_rules(val, broker);
-                    }
-                }
-            }
+    if !dir.is_dir() {
+        return Err(TestCommandError::Fixture {
+            path: dir.display().to_string(),
+            message: "fixtures path is not a directory".to_string(),
+        });
+    }
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let content =
+                std::fs::read_to_string(&path).map_err(|e| TestCommandError::Fixture {
+                    path: path.display().to_string(),
+                    message: format!("failed to read fixture file: {}", e),
+                })?;
+            let val: serde_json::Value =
+                serde_json::from_str(&content).map_err(|e| TestCommandError::Fixture {
+                    path: path.display().to_string(),
+                    message: format!("invalid JSON syntax: {}", e),
+                })?;
+            parse_and_add_fixture_rules(&path, val, broker)?;
         }
     }
+    Ok(())
 }
 
-fn parse_and_add_fixture_rules(val: serde_json::Value, broker: &mut MockBroker) {
+fn parse_and_add_fixture_rules(
+    path: &Path,
+    val: serde_json::Value,
+    broker: &mut MockBroker,
+) -> Result<(), TestCommandError> {
     match val {
         serde_json::Value::Array(items) => {
             for item in items {
-                add_single_fixture_rule(item, broker);
+                add_single_fixture_rule(path, item, broker)?;
             }
         }
         serde_json::Value::Object(_) => {
-            add_single_fixture_rule(val, broker);
+            add_single_fixture_rule(path, val, broker)?;
         }
-        _ => {}
+        _ => {
+            return Err(TestCommandError::Fixture {
+                path: path.display().to_string(),
+                message: "top-level fixture must be a JSON object or array of objects".to_string(),
+            });
+        }
     }
+    Ok(())
 }
 
-fn add_single_fixture_rule(val: serde_json::Value, broker: &mut MockBroker) {
-    let pattern = if let Some(exact) = val
-        .get("url")
-        .or_else(|| val.get("exact"))
-        .and_then(|v| v.as_str())
-    {
-        UrlPattern::Exact(exact.to_string())
-    } else if let Some(prefix) = val.get("prefix").and_then(|v| v.as_str()) {
-        UrlPattern::Prefix(prefix.to_string())
-    } else if let Some(pattern_str) = val.get("pattern").and_then(|v| v.as_str()) {
-        UrlPattern::Exact(pattern_str.to_string())
-    } else {
-        return;
-    };
-
-    let status_code = val
-        .get("status_code")
-        .or_else(|| val.get("status"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(200) as i32;
-
-    let mut headers = BTreeMap::new();
-    if let Some(h_obj) = val.get("headers").and_then(|v| v.as_object()) {
-        for (k, v) in h_obj {
-            if let Some(arr) = v.as_array() {
-                let vec_str: Vec<String> = arr
-                    .iter()
-                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                    .collect();
-                headers.insert(k.clone(), vec_str);
-            } else if let Some(s) = v.as_str() {
-                headers.insert(k.clone(), vec![s.to_string()]);
-            }
+fn add_single_fixture_rule(
+    path: &Path,
+    val: serde_json::Value,
+    broker: &mut MockBroker,
+) -> Result<(), TestCommandError> {
+    let object = val
+        .as_object()
+        .ok_or_else(|| fixture_error(path, "fixture rule must be an object"))?;
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "url"
+                | "exact"
+                | "prefix"
+                | "pattern"
+                | "status_code"
+                | "status"
+                | "headers"
+                | "json"
+                | "body_base64"
+                | "body"
+        ) {
+            return Err(fixture_error(
+                path,
+                format!("unknown fixture field '{field}'"),
+            ));
         }
     }
 
-    let body = if let Some(json_val) = val.get("json") {
-        if !headers.contains_key("Content-Type") {
+    let pattern_fields = ["url", "exact", "prefix", "pattern"];
+    let present_patterns: Vec<_> = pattern_fields
+        .iter()
+        .filter(|field| object.contains_key(**field))
+        .collect();
+    if present_patterns.len() != 1 {
+        return Err(fixture_error(
+            path,
+            "fixture rule must contain exactly one of 'url', 'exact', 'prefix', or 'pattern'",
+        ));
+    }
+    let pattern_field = *present_patterns[0];
+    let pattern_value = required_fixture_string(path, object, pattern_field)?;
+    if pattern_value.is_empty() {
+        return Err(fixture_error(path, "fixture URL pattern must be non-empty"));
+    }
+    let pattern = if pattern_field == "prefix" {
+        UrlPattern::Prefix(pattern_value.to_string())
+    } else {
+        UrlPattern::Exact(pattern_value.to_string())
+    };
+
+    if object.contains_key("status_code") && object.contains_key("status") {
+        return Err(fixture_error(
+            path,
+            "fixture rule must not contain both 'status_code' and 'status'",
+        ));
+    }
+    let status_code = match object.get("status_code").or_else(|| object.get("status")) {
+        Some(value) => {
+            let status = value
+                .as_i64()
+                .and_then(|status| i32::try_from(status).ok())
+                .ok_or_else(|| fixture_error(path, "fixture status must be an integer"))?;
+            if !(100..=599).contains(&status) {
+                return Err(fixture_error(
+                    path,
+                    "fixture status must be between 100 and 599",
+                ));
+            }
+            status
+        }
+        None => 200,
+    };
+
+    let mut headers = BTreeMap::new();
+    if let Some(value) = object.get("headers") {
+        let header_object = value
+            .as_object()
+            .ok_or_else(|| fixture_error(path, "fixture headers must be an object"))?;
+        for (name, value) in header_object {
+            if !is_valid_header_name(name) {
+                return Err(fixture_error(
+                    path,
+                    format!("invalid fixture header name '{name}'"),
+                ));
+            }
+            let values = if let Some(value) = value.as_str() {
+                vec![value.to_string()]
+            } else if let Some(array) = value.as_array() {
+                let mut values = Vec::with_capacity(array.len());
+                for value in array {
+                    let value = value.as_str().ok_or_else(|| {
+                        fixture_error(
+                            path,
+                            format!("fixture header '{name}' array must contain only strings"),
+                        )
+                    })?;
+                    values.push(value.to_string());
+                }
+                values
+            } else {
+                return Err(fixture_error(
+                    path,
+                    format!("fixture header '{name}' must be a string or string array"),
+                ));
+            };
+            if values.iter().any(|value| !is_valid_header_value(value)) {
+                return Err(fixture_error(
+                    path,
+                    format!("fixture header '{name}' contains an invalid value"),
+                ));
+            }
+            headers.insert(name.clone(), values);
+        }
+    }
+
+    let body_fields = ["json", "body_base64", "body"];
+    if body_fields
+        .iter()
+        .filter(|field| object.contains_key(**field))
+        .count()
+        > 1
+    {
+        return Err(fixture_error(
+            path,
+            "fixture rule must contain at most one of 'json', 'body_base64', or 'body'",
+        ));
+    }
+    let body = if let Some(json_value) = object.get("json") {
+        if !headers
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("content-type"))
+        {
             headers.insert(
                 "Content-Type".to_string(),
                 vec!["application/json".to_string()],
             );
         }
-        serde_json::to_vec(json_val).unwrap_or_default()
-    } else if let Some(b64) = val.get("body_base64").and_then(|v| v.as_str()) {
+        serde_json::to_vec(json_value).map_err(|error| {
+            fixture_error(path, format!("failed to serialize json field: {error}"))
+        })?
+    } else if object.contains_key("body_base64") {
+        let encoded = required_fixture_string(path, object, "body_base64")?;
         base64::engine::general_purpose::STANDARD
-            .decode(b64)
-            .unwrap_or_default()
-    } else if let Some(text) = val.get("body").and_then(|v| v.as_str()) {
-        text.as_bytes().to_vec()
+            .decode(encoded)
+            .map_err(|error| {
+                fixture_error(path, format!("invalid base64 in body_base64: {error}"))
+            })?
+    } else if object.contains_key("body") {
+        required_fixture_string(path, object, "body")?
+            .as_bytes()
+            .to_vec()
     } else {
         Vec::new()
     };
@@ -110,6 +242,55 @@ fn add_single_fixture_rule(val: serde_json::Value, broker: &mut MockBroker) {
         headers,
         body,
     });
+    Ok(())
+}
+
+fn required_fixture_string<'a>(
+    path: &Path,
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<&'a str, TestCommandError> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| fixture_error(path, format!("fixture field '{field}' must be a string")))
+}
+
+fn fixture_error(path: &Path, message: impl Into<String>) -> TestCommandError {
+    TestCommandError::Fixture {
+        path: path.display().to_string(),
+        message: message.into(),
+    }
+}
+
+fn is_valid_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn is_valid_header_value(value: &str) -> bool {
+    !value
+        .chars()
+        .any(|character| (character < ' ' && character != '\t') || character == '\u{7f}')
 }
 
 pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
@@ -132,7 +313,8 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
         runner.with_live_broker()
     } else {
         let mut mock_broker = MockBroker::new();
-        let fixtures_dir = args.fixtures.unwrap_or_else(|| {
+        let explicit_fixtures = args.fixtures.is_some();
+        let fixtures_dir = args.fixtures.clone().unwrap_or_else(|| {
             let manifest_dir = args
                 .manifest
                 .as_ref()
@@ -146,13 +328,13 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
             }
         });
 
-        if fixtures_dir.exists() {
+        if explicit_fixtures || fixtures_dir.exists() {
             println!(
                 "  {} Loading mock fixtures from: {}",
                 "[✓]".green(),
                 fixtures_dir.display()
             );
-            load_fixtures_from_dir(&fixtures_dir, &mut mock_broker);
+            load_fixtures_from_dir(&fixtures_dir, &mut mock_broker)?;
         }
 
         runner.with_mock_broker(mock_broker)
@@ -175,39 +357,41 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
     }
 
     // Test 2: Domain matching & extraction tests from manifest domains
-    for domain in &manifest.domains {
-        let test_url = format!("https://{}/test-resource-001", domain.host);
-        print!("  test match_url('{}') ... ", test_url);
-        match runner.match_url(&test_url) {
-            Ok(match_out) => {
-                if match_out.matched {
-                    println!(
-                        "{} (confidence: {}%)",
-                        "ok".green(),
-                        match_out.confidence.unwrap_or(0)
-                    );
-                    passed += 1;
+    if let Some(domains) = &manifest.domains {
+        for domain in domains {
+            let test_url = format!("https://{}/test-resource-001", domain.host);
+            print!("  test match_url('{}') ... ", test_url);
+            match runner.match_url(&test_url) {
+                Ok(match_out) => {
+                    if match_out.matched {
+                        println!(
+                            "{} (confidence: {}%)",
+                            "ok".green(),
+                            match_out.confidence.unwrap_or(0)
+                        );
+                        passed += 1;
 
-                    // Test extract
-                    print!("  test extract('{}') ... ", test_url);
-                    match runner.extract(&test_url) {
-                        Ok(extract_out) => {
-                            println!("{} (items: {})", "ok".green(), extract_out.items.len());
-                            passed += 1;
+                        // Test extract
+                        print!("  test extract('{}') ... ", test_url);
+                        match runner.extract(&test_url) {
+                            Ok(extract_out) => {
+                                println!("{} (items: {})", "ok".green(), extract_out.items.len());
+                                passed += 1;
+                            }
+                            Err(e) => {
+                                println!("{} ({})", "FAILED".red().bold(), e);
+                                failed += 1;
+                            }
                         }
-                        Err(e) => {
-                            println!("{} ({})", "FAILED".red().bold(), e);
-                            failed += 1;
-                        }
+                    } else {
+                        println!("{} (declared domain unmatched)", "FAILED".red().bold());
+                        failed += 1;
                     }
-                } else {
-                    println!("{} (unmatched)", "ok".yellow());
-                    passed += 1;
                 }
-            }
-            Err(e) => {
-                println!("{} ({})", "FAILED".red().bold(), e);
-                failed += 1;
+                Err(e) => {
+                    println!("{} ({})", "FAILED".red().bold(), e);
+                    failed += 1;
+                }
             }
         }
     }

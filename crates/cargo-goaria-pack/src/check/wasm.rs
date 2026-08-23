@@ -1,3 +1,4 @@
+use crate::commands::build::BuildError;
 use crate::manifest::{Manifest, ManifestError, CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
@@ -5,18 +6,20 @@ use wasmparser::{ExternalKind, Parser, Payload, ValType};
 
 #[derive(Debug, Error)]
 pub enum CheckError {
-    #[error("manifest validation error: {0}")]
+    #[error("manifest error: {0}")]
     Manifest(#[from] ManifestError),
+    #[error("build error: {0}")]
+    Build(#[from] BuildError),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("JSON parse error: {0}")]
+    #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("build error: {0}")]
-    Build(#[from] crate::commands::build::BuildError),
     #[error("WASM parser error: {0}")]
     WasmParser(String),
     #[error("missing required export function: '{0}'")]
     MissingExport(String),
+    #[error("unresolved export signature for '{0}'")]
+    UnresolvedExportSignature(String),
     #[error("invalid export signature for '{name}': expected {expected}, found {actual}")]
     InvalidExportSignature {
         name: String,
@@ -25,12 +28,33 @@ pub enum CheckError {
     },
     #[error("missing required linear memory export 'memory'")]
     MissingMemoryExport,
+    #[error("invalid linear memory: {0}")]
+    InvalidMemory(String),
+    #[error("disallowed import type '{kind}' for '{module}.{name}': only function imports from 'goaria_host' are allowed")]
+    DisallowedImportType {
+        module: String,
+        name: String,
+        kind: &'static str,
+    },
     #[error("forbidden import module '{module}': only 'goaria_host' is permitted")]
     ForbiddenImportModule { module: String },
     #[error("forbidden import function '{module}.{function}'")]
     ForbiddenImportFunction { module: String, function: String },
+    #[error("invalid import signature for '{name}': expected {expected}, found {actual}")]
+    InvalidImportSignature {
+        name: String,
+        expected: String,
+        actual: String,
+    },
     #[error("pack imports '{import}' but manifest is missing required capability '{capability}'")]
     MissingCapabilityForImport { import: String, capability: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisallowedImportInfo {
+    pub module: String,
+    pub name: String,
+    pub kind: &'static str,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -38,7 +62,13 @@ pub struct WasmAnalysis {
     pub exports: HashSet<String>,
     pub export_signatures: HashMap<String, String>,
     pub memory_exported: bool,
-    pub imports: Vec<(String, String)>,
+    pub memory_count: usize,
+    pub memory_initial_pages: Option<u64>,
+    pub memory_maximum_pages: Option<u64>,
+    pub memory_is_64: bool,
+    pub memory_is_shared: bool,
+    pub imports: Vec<(String, String, String)>,
+    pub non_func_imports: Vec<DisallowedImportInfo>,
     pub byte_size: usize,
 }
 
@@ -84,6 +114,7 @@ pub fn analyze_wasm_bytecode(wasm_bytes: &[u8]) -> Result<WasmAnalysis, CheckErr
 
     let mut types: Vec<(Vec<ValType>, Vec<ValType>)> = Vec::new();
     let mut import_func_type_indices: Vec<usize> = Vec::new();
+    let mut raw_imports: Vec<(String, String, usize)> = Vec::new();
     let mut defined_func_type_indices: Vec<usize> = Vec::new();
     let mut exported_funcs: Vec<(String, usize)> = Vec::new();
 
@@ -112,18 +143,65 @@ pub fn analyze_wasm_bytecode(wasm_bytes: &[u8]) -> Result<WasmAnalysis, CheckErr
             Payload::ImportSection(reader) => {
                 for import in reader {
                     let import = import.map_err(|e| CheckError::WasmParser(e.to_string()))?;
-                    if let wasmparser::TypeRef::Func(type_idx) = import.ty {
-                        import_func_type_indices.push(type_idx as usize);
+                    match import.ty {
+                        wasmparser::TypeRef::Func(type_idx) => {
+                            import_func_type_indices.push(type_idx as usize);
+                            raw_imports.push((
+                                import.module.to_string(),
+                                import.name.to_string(),
+                                type_idx as usize,
+                            ));
+                        }
+                        wasmparser::TypeRef::Memory(mem) => {
+                            analysis.non_func_imports.push(DisallowedImportInfo {
+                                module: import.module.to_string(),
+                                name: import.name.to_string(),
+                                kind: "memory",
+                            });
+                            analysis.memory_count += 1;
+                            analysis.memory_initial_pages = Some(mem.initial);
+                            analysis.memory_maximum_pages = mem.maximum;
+                            analysis.memory_is_64 = mem.memory64;
+                            analysis.memory_is_shared = mem.shared;
+                        }
+                        wasmparser::TypeRef::Table(_) => {
+                            analysis.non_func_imports.push(DisallowedImportInfo {
+                                module: import.module.to_string(),
+                                name: import.name.to_string(),
+                                kind: "table",
+                            });
+                        }
+                        wasmparser::TypeRef::Global(_) => {
+                            analysis.non_func_imports.push(DisallowedImportInfo {
+                                module: import.module.to_string(),
+                                name: import.name.to_string(),
+                                kind: "global",
+                            });
+                        }
+                        wasmparser::TypeRef::Tag(_) => {
+                            analysis.non_func_imports.push(DisallowedImportInfo {
+                                module: import.module.to_string(),
+                                name: import.name.to_string(),
+                                kind: "tag",
+                            });
+                        }
                     }
-                    analysis
-                        .imports
-                        .push((import.module.to_string(), import.name.to_string()));
                 }
             }
             Payload::FunctionSection(reader) => {
                 for func in reader {
                     let type_idx = func.map_err(|e| CheckError::WasmParser(e.to_string()))?;
                     defined_func_type_indices.push(type_idx as usize);
+                }
+            }
+            Payload::MemorySection(reader) => {
+                for mem in reader {
+                    let mem = mem.map_err(|e| CheckError::WasmParser(e.to_string()))?;
+                    analysis.memory_count += 1;
+                    analysis.memory_initial_pages = Some(mem.initial);
+                    analysis.memory_maximum_pages = mem.maximum;
+                    analysis.memory_is_64 = mem.memory64;
+                    analysis.memory_is_shared = mem.shared;
                 }
             }
             Payload::ExportSection(reader) => {
@@ -140,6 +218,16 @@ pub fn analyze_wasm_bytecode(wasm_bytes: &[u8]) -> Result<WasmAnalysis, CheckErr
             }
             _ => {}
         }
+    }
+
+    // Resolve imported function signatures
+    for (module, name, type_idx) in raw_imports {
+        let sig_str = if let Some((params, results)) = types.get(type_idx) {
+            func_type_to_str(params, results)
+        } else {
+            "unknown".to_string()
+        };
+        analysis.imports.push((module, name, sig_str));
     }
 
     // Resolve exported function signatures
@@ -183,14 +271,16 @@ pub fn verify_wasm_and_manifest(
         if !analysis.exports.contains(req) {
             return Err(CheckError::MissingExport(req.to_string()));
         }
-        if let Some(actual_sig) = analysis.export_signatures.get(req) {
-            if actual_sig != expected_sig {
-                return Err(CheckError::InvalidExportSignature {
-                    name: req.to_string(),
-                    expected: expected_sig.to_string(),
-                    actual: actual_sig.clone(),
-                });
-            }
+        let actual_sig = analysis
+            .export_signatures
+            .get(req)
+            .ok_or_else(|| CheckError::UnresolvedExportSignature(req.to_string()))?;
+        if actual_sig != expected_sig {
+            return Err(CheckError::InvalidExportSignature {
+                name: req.to_string(),
+                expected: expected_sig.to_string(),
+                actual: actual_sig.clone(),
+            });
         }
     }
 
@@ -198,12 +288,62 @@ pub fn verify_wasm_and_manifest(
     if !analysis.memory_exported {
         return Err(CheckError::MissingMemoryExport);
     }
+    if analysis.memory_count != 1 {
+        return Err(CheckError::InvalidMemory(format!(
+            "expected exactly 1 linear memory, found {}",
+            analysis.memory_count
+        )));
+    }
+    if analysis.memory_is_64 {
+        return Err(CheckError::InvalidMemory(
+            "64-bit memory is not supported".to_string(),
+        ));
+    }
+    if analysis.memory_is_shared {
+        return Err(CheckError::InvalidMemory(
+            "shared memory is not supported".to_string(),
+        ));
+    }
+    if let Some(initial) = analysis.memory_initial_pages {
+        if initial > manifest.resource_limits.max_memory_pages as u64 {
+            return Err(CheckError::InvalidMemory(format!(
+                "initial memory pages ({}) exceeds manifest max_memory_pages ({})",
+                initial, manifest.resource_limits.max_memory_pages
+            )));
+        }
+    }
+    if let Some(maximum) = analysis.memory_maximum_pages {
+        if maximum > manifest.resource_limits.max_memory_pages as u64 {
+            return Err(CheckError::InvalidMemory(format!(
+                "maximum memory pages ({}) exceeds manifest max_memory_pages ({})",
+                maximum, manifest.resource_limits.max_memory_pages
+            )));
+        }
+    }
 
-    // 4. Validate imports against 'goaria_host' and capabilities
-    for (module, field) in &analysis.imports {
+    // 4. Reject all non-function imports
+    if let Some(non_func) = analysis.non_func_imports.first() {
+        return Err(CheckError::DisallowedImportType {
+            module: non_func.module.clone(),
+            name: non_func.name.clone(),
+            kind: non_func.kind,
+        });
+    }
+
+    // 5. Validate function imports against 'goaria_host' and capabilities
+    for (module, field, sig) in &analysis.imports {
         if module != "goaria_host" {
             return Err(CheckError::ForbiddenImportModule {
                 module: module.clone(),
+            });
+        }
+
+        let expected_sig = "(i32, i32) -> i64";
+        if sig != expected_sig {
+            return Err(CheckError::InvalidImportSignature {
+                name: format!("{}.{}", module, field),
+                expected: expected_sig.to_string(),
+                actual: sig.clone(),
             });
         }
 

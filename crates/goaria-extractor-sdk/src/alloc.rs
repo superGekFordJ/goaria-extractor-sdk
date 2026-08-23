@@ -146,11 +146,19 @@ pub struct GuestBuffer {
 }
 
 impl GuestBuffer {
-    pub fn from_raw(ptr: i32, len: i32) -> Option<Self> {
-        if ptr == 0 || len <= 0 {
+    /// Constructs a `GuestBuffer` from raw host-allocated pointer and length.
+    ///
+    /// # Safety
+    /// The caller must ensure that `ptr` and `len` represent a valid host-allocated guest buffer
+    /// that is owned by this `GuestBuffer` and must be deallocated using [`free`].
+    pub(crate) unsafe fn from_host_raw(ptr: u32, len: u32) -> Option<Self> {
+        if ptr == 0 || len == 0 || len > i32::MAX as u32 {
             None
         } else {
-            Some(Self { ptr, len })
+            Some(Self {
+                ptr: ptr as i32,
+                len: len as i32,
+            })
         }
     }
 
@@ -186,6 +194,25 @@ impl Drop for GuestBuffer {
     fn drop(&mut self) {
         unsafe {
             free(self.ptr, self.len);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_guest_buffer_from_host_raw_validation() {
+        unsafe {
+            assert!(GuestBuffer::from_host_raw(0, 10).is_none());
+            assert!(GuestBuffer::from_host_raw(100, 0).is_none());
+            assert!(GuestBuffer::from_host_raw(100, (i32::MAX as u32) + 1).is_none());
+
+            let (ptr, len) = copy_slice_to_guest(b"internal-test");
+            let buf = GuestBuffer::from_host_raw(ptr as u32, len as u32).expect("valid buffer");
+            assert_eq!(buf.as_slice(), b"internal-test");
+            assert_eq!(buf.len(), len);
         }
     }
 }

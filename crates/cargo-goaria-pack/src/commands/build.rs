@@ -42,6 +42,18 @@ pub fn build_wasm(project_dir: &Path, release: bool) -> Result<PathBuf, BuildErr
     }
 }
 
+fn configured_cargo_target_dir() -> Result<Option<PathBuf>, BuildError> {
+    let Some(configured) = std::env::var_os("CARGO_TARGET_DIR") else {
+        return Ok(None);
+    };
+    let configured = PathBuf::from(configured);
+    if configured.is_absolute() {
+        Ok(Some(configured))
+    } else {
+        Ok(Some(std::env::current_dir()?.join(configured)))
+    }
+}
+
 fn build_rust_wasm(project_dir: &Path, release: bool) -> Result<PathBuf, BuildError> {
     println!(
         "{} compiling Rust WebAssembly module (target: wasm32-unknown-unknown)...",
@@ -52,6 +64,9 @@ fn build_rust_wasm(project_dir: &Path, release: bool) -> Result<PathBuf, BuildEr
         .arg("--target")
         .arg("wasm32-unknown-unknown")
         .current_dir(project_dir);
+    if let Some(target_dir) = configured_cargo_target_dir()? {
+        cmd.env("CARGO_TARGET_DIR", target_dir);
+    }
     if release {
         cmd.arg("--release");
     }
@@ -130,7 +145,11 @@ pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBu
     let mode = if release { "release" } else { "debug" };
     let candidate_names = get_project_candidate_names(project_dir);
 
-    let search_dirs = [
+    let mut search_dirs = Vec::new();
+    if let Some(configured) = configured_cargo_target_dir()? {
+        search_dirs.push(configured.join("wasm32-unknown-unknown").join(mode));
+    }
+    search_dirs.extend([
         project_dir
             .join("target")
             .join("wasm32-unknown-unknown")
@@ -146,20 +165,15 @@ pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBu
             .join("target")
             .join("wasm32-unknown-unknown")
             .join(mode),
-    ];
+    ]);
 
     for target_dir in &search_dirs {
         if target_dir.exists() {
-            // First check specific candidate names
             for name in &candidate_names {
                 let candidate_path = target_dir.join(format!("{}.wasm", name));
                 if candidate_path.exists() && candidate_path.is_file() {
                     return Ok(candidate_path);
                 }
-            }
-            // Fall back to any .wasm in directory
-            if let Some(wasm) = find_wasm_in_dir(target_dir)? {
-                return Ok(wasm);
             }
         }
     }
@@ -170,11 +184,18 @@ pub fn find_rust_wasm_binary(project_dir: &Path, release: bool) -> Result<PathBu
 }
 
 pub fn find_zig_wasm_binary(project_dir: &Path) -> Result<PathBuf, BuildError> {
-    let candidate_names = get_project_candidate_names(project_dir);
+    let mut candidate_names = get_project_candidate_names(project_dir);
+    candidate_names.push("payload".to_string());
+    candidate_names.dedup();
 
     let search_dirs = [
         project_dir.join("zig-out").join("bin"),
         project_dir.join("..").join("zig-out").join("bin"),
+        project_dir
+            .join("..")
+            .join("..")
+            .join("zig-out")
+            .join("bin"),
     ];
 
     for target_dir in &search_dirs {
@@ -185,27 +206,12 @@ pub fn find_zig_wasm_binary(project_dir: &Path) -> Result<PathBuf, BuildError> {
                     return Ok(candidate_path);
                 }
             }
-            if let Some(wasm) = find_wasm_in_dir(target_dir)? {
-                return Ok(wasm);
-            }
         }
     }
 
     Err(BuildError::WasmNotFound(
         search_dirs[0].display().to_string(),
     ))
-}
-
-fn find_wasm_in_dir(dir: &Path) -> Result<Option<PathBuf>, BuildError> {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("wasm") {
-                return Ok(Some(path));
-            }
-        }
-    }
-    Ok(None)
 }
 
 pub fn handle_build(args: BuildArgs) -> Result<PathBuf, BuildError> {

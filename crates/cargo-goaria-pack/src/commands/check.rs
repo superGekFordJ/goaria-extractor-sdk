@@ -1,6 +1,8 @@
 use crate::check::{analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError};
 use crate::cli::CheckArgs;
-use crate::commands::build::{find_rust_wasm_binary, find_zig_wasm_binary};
+use crate::commands::build::{
+    detect_project_type, find_rust_wasm_binary, find_zig_wasm_binary, ProjectType,
+};
 use crate::manifest::Manifest;
 use colored::Colorize;
 use std::path::{Path, PathBuf};
@@ -20,7 +22,11 @@ pub fn resolve_manifest_and_wasm(
     let wasm_path = if let Some(p) = explicit_wasm {
         p.clone()
     } else {
-        find_rust_wasm_binary(project_dir, true).or_else(|_| find_zig_wasm_binary(project_dir))?
+        let proj_type = detect_project_type(project_dir)?;
+        match proj_type {
+            ProjectType::Rust => find_rust_wasm_binary(project_dir, true)?,
+            ProjectType::Zig => find_zig_wasm_binary(project_dir)?,
+        }
     };
 
     let wasm_bytes = std::fs::read(&wasm_path)?;

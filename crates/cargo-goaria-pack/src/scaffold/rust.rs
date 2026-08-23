@@ -55,7 +55,7 @@ serde_json = {{ version = "1.0", default-features = false, features = ["alloc"] 
     let lib_rs = r#"use std::collections::BTreeMap;
 use goaria_extractor_sdk::prelude::*;
 
-#[goaria_pack]
+#[goaria_extractor]
 #[derive(Default)]
 pub struct ExtractorImpl;
 

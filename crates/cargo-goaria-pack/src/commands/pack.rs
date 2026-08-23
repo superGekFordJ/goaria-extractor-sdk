@@ -1,6 +1,9 @@
 use crate::check::{analyze_wasm_bytecode, verify_wasm_and_manifest, CheckError};
 use crate::cli::PackArgs;
-use crate::commands::build::{build_wasm, find_rust_wasm_binary, find_zig_wasm_binary, BuildError};
+use crate::commands::build::{
+    build_wasm, detect_project_type, find_rust_wasm_binary, find_zig_wasm_binary, BuildError,
+    ProjectType,
+};
 use crate::manifest::Manifest;
 use crate::pack::crypto::{
     generate_keypair, parse_signing_key, sha256_hex, sign_manifest, verify_manifest_signature,
@@ -9,7 +12,7 @@ use crate::pack::crypto::{
 use crate::pack::lock::{LockEntry, LockFile};
 use crate::pack::zip::{build_deterministic_pack_zip, ZipPackError};
 use colored::Colorize;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -26,6 +29,16 @@ pub enum PackCommandError {
     Io(#[from] std::io::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid asset filename '{0}': must be a valid single leaf filename ending with .pack.zip and without path traversal")]
+    InvalidAssetName(String),
+}
+
+fn validate_asset_name(name: &str) -> Result<(), PackCommandError> {
+    let mut components = Path::new(name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(_)), None) if name.ends_with(".pack.zip") => Ok(()),
+        _ => Err(PackCommandError::InvalidAssetName(name.to_string())),
+    }
 }
 
 pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
@@ -35,7 +48,11 @@ pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
 
     // 1. Build WASM if needed
     let wasm_path = if args.skip_build {
-        find_rust_wasm_binary(project_dir, true).or_else(|_| find_zig_wasm_binary(project_dir))?
+        let proj_type = detect_project_type(project_dir)?;
+        match proj_type {
+            ProjectType::Rust => find_rust_wasm_binary(project_dir, true)?,
+            ProjectType::Zig => find_zig_wasm_binary(project_dir)?,
+        }
     } else {
         build_wasm(project_dir, true)?
     };
@@ -88,10 +105,12 @@ pub fn handle_pack(args: PackArgs) -> Result<PathBuf, PackCommandError> {
         build_deterministic_pack_zip(&canonical_manifest_json, &wasm_bytes, &sig_bytes)?;
     let asset_sha = sha256_hex(&zip_bytes);
 
-    // 8. Determine asset filenames
+    // 8. Determine and validate asset filenames
     let zip_name = args
         .asset_name
         .unwrap_or_else(|| format!("{}-{}.pack.zip", manifest.pack_id, manifest.pack_version));
+    validate_asset_name(&zip_name)?;
+
     let zip_path = out_dir.join(&zip_name);
     let lock_path = out_dir.join(format!("{}.lock.json", manifest.pack_id));
 
