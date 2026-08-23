@@ -89,6 +89,23 @@ fn test_scaffold_zig_project() {
 }
 
 #[test]
+fn test_new_command_prints_build_before_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("quickstart-pack");
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-goaria-pack"))
+        .args(["new", "quickstart-pack", "--path"])
+        .arg(&project_dir)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let build_position = stdout.find("cargo goaria-pack build").unwrap();
+    let check_position = stdout.find("cargo goaria-pack check").unwrap();
+    assert!(build_position < check_position);
+}
+
+#[test]
 fn test_pack_name_validation() {
     assert!(validate_pack_name("valid-pack").is_ok());
     assert!(validate_pack_name("valid_pack_123").is_ok());

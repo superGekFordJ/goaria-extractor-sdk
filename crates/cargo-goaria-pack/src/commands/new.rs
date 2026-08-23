@@ -21,8 +21,8 @@ pub fn handle_new(args: NewArgs) -> Result<(), ScaffoldError> {
     );
     println!("\nNext steps:");
     println!("  cd {}", target_dir.display());
-    println!("  cargo goaria-pack check");
     println!("  cargo goaria-pack build");
+    println!("  cargo goaria-pack check");
     println!("  cargo goaria-pack test");
     Ok(())
 }

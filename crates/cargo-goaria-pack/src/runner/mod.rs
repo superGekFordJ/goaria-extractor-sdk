@@ -417,6 +417,9 @@ fn validate_abi_url(raw_url: &str, field: &str) -> Result<(), RunnerError> {
     if authority.is_empty() {
         return Err(validation_error(format!("{field} must include host")));
     }
+    if authority.contains('\\') {
+        return Err(validation_error(format!("{field} is malformed")));
+    }
 
     let parsed =
         url::Url::parse(raw_url).map_err(|_| validation_error(format!("{field} is malformed")))?;
@@ -541,6 +544,7 @@ mod tests {
             "",
             "ftp://example.com/file",
             "https:example.com/file",
+            "https://example.com\\path",
             "https://user:pass@example.com/file",
             " https://example.com/file",
             "https://example.com/file\r\nheader: value",
