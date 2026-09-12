@@ -239,7 +239,7 @@ Execute with live network access:
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123 --live
 ```
-Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Redirects are disabled in the local runner.
+Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Basic fetch requests follow at most 5 redirects with per-hop domain/SSRF re-checks; extended fetch requests (`cap.http.fetch.extended`) fail closed on any redirect and require HTTPS.
 
 ### 5.2 Host-Visible Buffer Ownership Check
 The CLI verifies balanced ownership for ABI buffers visible to the host, including host-created input buffers and guest-returned output buffers. It cannot observe arbitrary allocations inside the guest allocator, so this check is not whole-guest leak detection and does not claim an exact leaked-byte count.
@@ -273,6 +273,6 @@ cargo goaria-pack pack \
 ## 7. Security Principles & Capabilities
 
 1. **Host-Custody Credential Isolation**: Raw tokens and cookies never touch guest WebAssembly memory.
-2. **Capability Declarations**: Extractors must declare `cap.parse.wasm`, `cap.http.fetch`, or `cap.auth.profile` in `manifest.json`.
+2. **Capability Declarations**: Extractors must declare `cap.parse.wasm`, `cap.http.fetch`, `cap.http.fetch.extended`, or `cap.auth.profile` in `manifest.json`. The extended fetch capability covers `POST`/`body_base64` and pack-owned `Authorization`/`X-*` headers; it requires `cap.http.fetch` and cannot be combined with `auth_profile_ref`.
 3. **No-Name Policy / Zero Domain Leakage**: All tests, fixtures, and documentation strictly use RFC 2606 reserved domains (`fixture.invalid`, `example.com`).
 4. **Supply Chain Integrity**: Every pack is digitally signed with Ed25519 and verified against the GoAria host trust policy before execution.

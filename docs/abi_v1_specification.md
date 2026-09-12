@@ -137,6 +137,8 @@ Modules declaring required capabilities may import broker syscalls from the `"go
 ### 4.1 `goaria_host.http_fetch`
 ```c
 // Required capability: "cap.http.fetch"
+// Extended features (POST/body/pack-owned Authorization or X-* headers)
+// additionally require "cap.http.fetch.extended".
 int64_t http_fetch(int32_t req_ptr, int32_t req_len);
 ```
 - **Description**: Executes a brokered HTTP request through the host runtime. The host attaches credentials and proxies the request according to the active host policy.
@@ -225,21 +227,25 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 #### `HostHTTPFetchRequest`
 ```json
 {
-  "method": "GET",
+  "method": "POST",
   "url": "https://api.fixture.invalid/v1/metadata",
-  "broker_policy_ref": "standard_api",
-  "endpoint_ref": "get_meta",
-  "params": {
-    "id": "123"
-  },
   "headers": {
-    "Accept": "application/json"
+    "Accept": "application/json",
+    "Content-Type": "application/json"
   },
-  "auth_profile_ref": "default",
+  "body_base64": "eyJpZCI6IjEyMyJ9",
   "timeout_millis": 5000,
   "max_response_bytes": 1048576
 }
 ```
+- `method` (`string`, optional): `GET` (default), `HEAD`, or `POST`.
+- `url` (`string`, optional): Raw-mode target URL. Mutually exclusive with `broker_policy_ref`/`endpoint_ref`/`params`; a request uses exactly one mode.
+- `broker_policy_ref`, `endpoint_ref` (`string`, optional): Ref-mode opaque references; only valid as a pair under an alias (policy-ref) manifest.
+- `params` (`map[string]string`, optional): Ref-mode parameters.
+- `headers` (`map[string]string`, optional): Request headers. Safe names pass with `cap.http.fetch`; pack-owned `Authorization` and business `X-*` names additionally require `cap.http.fetch.extended`. Forbidden names (e.g. `Cookie`, `Host`, `Content-Length`) are always rejected.
+- `body_base64` (`string`, optional): Strict padded standard Base64 request body, decoded cap 16 KiB. Requires `method: "POST"` and exactly one `Content-Type` of `application/json` or `application/x-www-form-urlencoded`.
+- `auth_profile_ref` (`string`, optional): Host auth profile reference. Mutually exclusive with extended fetch features.
+- `timeout_millis`, `max_response_bytes` (`int`, optional): Per-request limits; `0` or omitted means unset (effective value is the smallest positive of request, manifest, and policy maximum).
 
 #### `HostHTTPFetchResponse`
 ```json
@@ -296,7 +302,8 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 ### 6.1 Capability Manifest Enforcement
 Packs declare required capabilities in `manifest.json`. The host strictly checks capabilities before allowing execution:
 - `cap.parse.wasm`: Grants permission to compile and instantiate the WebAssembly payload.
-- `cap.http.fetch`: Grants permission to invoke `goaria_host.http_fetch`.
+- `cap.http.fetch`: Grants permission to invoke `goaria_host.http_fetch` for basic GET/HEAD requests.
+- `cap.http.fetch.extended`: Grants extended fetch features (`POST`, `body_base64`, pack-owned `Authorization`, business `X-*` headers). Requires `cap.http.fetch`; cannot be combined with `auth_profile_ref`. Extended requests must use HTTPS and fail closed on any redirect.
 - `cap.auth.profile`: Grants permission to invoke `goaria_host.auth_profile_status`.
 
 ### 6.2 Host-Custody Credential Isolation

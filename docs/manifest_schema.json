@@ -44,6 +44,7 @@
         "enum": [
           "cap.parse.wasm",
           "cap.http.fetch",
+          "cap.http.fetch.extended",
           "cap.auth.profile"
         ]
       },

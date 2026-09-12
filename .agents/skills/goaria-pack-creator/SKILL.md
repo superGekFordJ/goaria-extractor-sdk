@@ -247,6 +247,7 @@ pub struct HostHTTPFetchRequest {
     pub endpoint_ref: Option<String>,        // Endpoint ref (for alias mode, e.g. "ep-xxx")
     pub params: Option<BTreeMap<String, String>>, // Path/query substitutions (e.g. {"id": "123"})
     pub headers: Option<BTreeMap<String, String>>,
+    pub body_base64: Option<String>,         // POST body as padded base64 (extended cap)
     pub auth_profile_ref: Option<String>,    // Host injects credentials if authorized
     pub timeout_millis: Option<i32>,
     pub max_response_bytes: Option<i64>,
@@ -257,13 +258,16 @@ pub struct HostHTTPFetchRequest {
 - `HostBroker::fetch(&req) -> Result<HostHTTPFetchResponse, ExtractorError>`: Raw JSON response with base64 body. Automatically validates `resp.ok` and HTTP status `< 400`.
 - `HostBroker::fetch_text(&req) -> Result<String, ExtractorError>`: Fetches and decodes body base64 into a UTF-8 `String`.
 - `HostBroker::fetch_json<T: DeserializeOwned>(&req) -> Result<T, ExtractorError>`: Fetches, decodes base64, and deserializes JSON directly into struct `T`.
-- `HostBroker::fetch_ref(bpr, ep, params) -> Result<HostHTTPFetchResponse, ExtractorError>`: Shorthand for alias-mode endpoint invocation.
+- `HostBroker::fetch_url_with_body(url, body, content_type) -> Result<HostHTTPFetchResponse, ExtractorError>`: POST a raw body with a single `Content-Type` header (requires `cap.http.fetch.extended`).
+- `HostBroker::fetch_ref(bpr, ep, params) -> Result<HostHTTPFetchResponse, ExtractorError>`: Shorthand for alias-mode endpoint invocation (refs only — never combine with `url`).
 - `HostBroker::is_auth_available(profile_ref, url) -> Result<bool, ExtractorError>`: Checks if valid user credentials exist for the profile without exposing the secret.
 
 ### High-Level `HostBroker` Methods (Zig)
 - `goaria.HostBroker.fetch(allocator, req) -> !Parsed(HostHTTPFetchResponse)`
 - `goaria.HostBroker.fetchText(allocator, req) -> ![]const u8` (Zero-copy decoded slice)
 - `goaria.HostBroker.fetchBytes(allocator, req) -> ![]u8`
+- `goaria.HostBroker.fetchUrlWithBody(allocator, url, body, content_type) -> !Parsed(HostHTTPFetchResponse)` (requires `cap.http.fetch.extended`)
+- `goaria.HostBroker.fetchRef(allocator, bpr, ep, params) -> !Parsed(HostHTTPFetchResponse)` (refs only — never combine with `url`)
 - `goaria.HostBroker.isAuthAvailable(allocator, profile_ref, url) -> !bool`
 
 ---
@@ -278,6 +282,7 @@ pub struct HostHTTPFetchRequest {
    - **Alias Policy Ref Mode**: `domains` MUST be an explicit empty array `[]`. `domain_policy_refs` and `broker_policy_refs` MUST be non-empty arrays.
 2. **Capability Matching**:
    - If importing `http_fetch`, manifest must declare `"cap.http.fetch"`.
+   - POST/`body_base64`, pack-owned `Authorization`, or business `X-*` headers additionally require `"cap.http.fetch.extended"` (which must be declared alongside `"cap.http.fetch"`); extended fetch must not be combined with `auth_profile_ref`.
    - If querying auth status or binding auth profiles, manifest must declare `"cap.auth.profile"`.
    - All packs must declare `"cap.parse.wasm"`.
 3. **Resource Limits & Host Ceilings**:
@@ -294,6 +299,7 @@ pub struct HostHTTPFetchRequest {
 
 ### Rust Blueprint
 ```rust
+use base64::Engine;
 use goaria_extractor_sdk::prelude::*;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -321,19 +327,22 @@ impl Extractor for CustomExtractor {
 
     fn extract(&self, input: ExtractInput) -> Result<ExtractOutput, ExtractorError> {
         let broker = HostBroker::new();
-        
-        let req = HostHTTPFetchRequest {
-            url: Some(input.url),
-            method: Some("GET".to_string()),
-            broker_policy_ref: Some("bpr-custom01".to_string()),
-            endpoint_ref: Some("ep-custom01".to_string()),
-            ..Default::default()
-        };
+        let mut params = BTreeMap::new();
+        params.insert("url".to_string(), input.url);
 
-        // Fail-closed on fetch or parse errors
-        let payload: ServicePayload = match broker.fetch_json(&req) {
-            Ok(data) => data,
+        // Ref-only invocation: never combine refs with `url`/`method`.
+        let resp = match broker.fetch_ref("bpr-custom01", "ep-custom01", params) {
+            Ok(resp) => resp,
             Err(_) => return Ok(ExtractOutput::default()),
+        };
+        let body = resp.body_base64.as_deref().unwrap_or_default();
+        let payload: ServicePayload = match base64::engine::general_purpose::STANDARD
+            .decode(body)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        {
+            Some(payload) => payload,
+            None => return Ok(ExtractOutput::default()),
         };
 
         if payload.status.as_deref() != Some("ok") {
@@ -374,13 +383,20 @@ pub const CustomExtractor = struct {
     }
 
     pub fn extract(allocator: std.mem.Allocator, input: goaria.ExtractInput) !goaria.ExtractOutput {
-        const body = goaria.HostBroker.fetchText(allocator, .{
-            .url = input.url,
-            .method = "GET",
-            .broker_policy_ref = "bpr-custom01",
-            .endpoint_ref = "ep-custom01",
-        }) catch return goaria.ExtractOutput.empty();
+        // Ref-only invocation: never combine refs with `url`/`method`.
+        var parsed = goaria.HostBroker.fetchRef(
+            allocator,
+            "bpr-custom01",
+            "ep-custom01",
+            null,
+        ) catch return goaria.ExtractOutput.empty();
+        defer parsed.deinit();
+
+        const encoded = parsed.value.body_base64 orelse return goaria.ExtractOutput.empty();
+        const body_len = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return goaria.ExtractOutput.empty();
+        const body = allocator.alloc(u8, body_len) catch return goaria.ExtractOutput.empty();
         defer allocator.free(body);
+        std.base64.standard.Decoder.decode(body, encoded) catch return goaria.ExtractOutput.empty();
 
         // Perform zero-copy string slicing or JSON parsing
         const download_url = extractUrl(body) orelse return goaria.ExtractOutput.empty();
