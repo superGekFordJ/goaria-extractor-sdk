@@ -5,7 +5,9 @@ use goaria_extractor_sdk::types::{
 };
 
 use crate::manifest::Manifest;
-use crate::runner::host_broker::{is_valid_profile_slug, validate_ref_params};
+use crate::runner::host_broker::{
+    check_hop_target, is_alias_manifest, is_valid_profile_slug, validate_ref_params,
+};
 use crate::runner::limits::HostCallBudget;
 
 /// Configuration for a simulated auth profile.
@@ -111,6 +113,25 @@ impl AuthProvider {
                 ..Default::default()
             };
         }
+        // Alias manifests only speak refs; plain manifests only raw urls.
+        if has_url && is_alias_manifest(manifest) {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some(
+                    "alias manifests require broker_policy_ref and endpoint_ref".to_string(),
+                ),
+                ..Default::default()
+            };
+        }
+        if has_broker_ref && !is_alias_manifest(manifest) {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some("ref-mode fields require an alias manifest".to_string()),
+                ..Default::default()
+            };
+        }
         if let Some(params) = req.params.as_ref().filter(|p| !p.is_empty()) {
             if let Err(deny) = validate_ref_params(params) {
                 return HostAuthProfileStatusResponse {
@@ -157,16 +178,16 @@ impl AuthProvider {
             }
         }
         if has_url {
-            match manifest.allows_url(req.url.as_deref().unwrap_or_default()) {
-                Ok(true) => {}
-                _ => {
-                    return HostAuthProfileStatusResponse {
-                        ok: false,
-                        error_code: Some("policy_denied".to_string()),
-                        message: Some("request url is not allowed by manifest policy".to_string()),
-                        ..Default::default()
-                    };
-                }
+            // Reuse the shared egress gate so dangerous schemes and unsafe
+            // hosts are denied exactly like a fetch hop.
+            let url = req.url.as_deref().unwrap_or_default();
+            if check_hop_target(url, manifest, false, false).is_err() {
+                return HostAuthProfileStatusResponse {
+                    ok: false,
+                    error_code: Some("policy_denied".to_string()),
+                    message: Some("request url is not allowed by manifest policy".to_string()),
+                    ..Default::default()
+                };
             }
         }
 
@@ -183,7 +204,7 @@ impl AuthProvider {
             },
             None => HostAuthProfileStatusResponse {
                 ok: false,
-                available: Some(false),
+                available: None,
                 kind: None,
                 redacted_display: None,
                 error_code: Some("auth_unavailable".to_string()),

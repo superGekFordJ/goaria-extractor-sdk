@@ -385,7 +385,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp = broker
-        .resolve(&req_exact, &get_shape)
+        .resolve(&req_exact, &get_shape, None)
         .expect("should resolve exact match");
     assert!(resp.ok);
     assert_eq!(resp.status_code, Some(200));
@@ -396,7 +396,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp_prefix = broker
-        .resolve(&req_prefix, &get_shape)
+        .resolve(&req_prefix, &get_shape, None)
         .expect("should resolve prefix match");
     assert!(resp_prefix.ok);
 
@@ -404,7 +404,7 @@ fn test_mock_broker_matching() {
         url: Some("https://share.fixture.invalid/not-found".to_string()),
         ..Default::default()
     };
-    assert!(broker.resolve(&req_unmatched, &get_shape).is_none());
+    assert!(broker.resolve(&req_unmatched, &get_shape, None).is_none());
 }
 
 #[test]
@@ -449,8 +449,82 @@ fn test_auth_provider_simulation() {
     };
     let resp_missing = auth.handle_status(&manifest, &mut budget, req_missing);
     assert!(!resp_missing.ok);
-    assert_eq!(resp_missing.available, Some(false));
+    assert_eq!(resp_missing.available, None);
     assert_eq!(resp_missing.error_code.as_deref(), Some("auth_unavailable"));
+    // The false field is omitted on the wire, matching the host's omitempty.
+    let wire = serde_json::to_value(&resp_missing).unwrap();
+    assert!(wire.get("available").is_none());
+}
+
+#[test]
+fn test_auth_status_mode_and_url_gates() {
+    let mut auth = AuthProvider::new();
+    auth.add_profile("default", true, AuthSecretKind::Bearer, "x", None);
+
+    let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
+    let mut plain: Manifest = serde_json::from_str(manifest_str).unwrap();
+    plain
+        .capabilities
+        .push(Capability(CAPABILITY_AUTH_PROFILE.to_string()));
+
+    // Alias manifest: explicit empty domains plus declared policy refs.
+    let mut alias = plain.clone();
+    alias.domains = Some(Vec::new());
+    alias.domain_policy_refs = Some(vec!["dpr".to_string()]);
+    alias.broker_policy_refs = Some(vec!["bpr".to_string()]);
+
+    let mut budget = HostCallBudget::new(20);
+
+    // A raw url under an alias manifest is a request-shape error.
+    let resp = auth.handle_status(
+        &alias,
+        &mut budget,
+        HostAuthProfileStatusRequest {
+            auth_profile_ref: "default".to_string(),
+            url: Some("https://share.fixture.invalid/api".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(resp.error_code.as_deref(), Some("invalid_request"));
+
+    // Ref-mode fields under a non-alias manifest are likewise invalid.
+    let resp = auth.handle_status(
+        &plain,
+        &mut budget,
+        HostAuthProfileStatusRequest {
+            auth_profile_ref: "default".to_string(),
+            broker_policy_ref: Some("bpr".to_string()),
+            endpoint_ref: Some("ep".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(resp.error_code.as_deref(), Some("invalid_request"));
+
+    // Declared refs under an alias manifest reach the profile lookup.
+    let resp = auth.handle_status(
+        &alias,
+        &mut budget,
+        HostAuthProfileStatusRequest {
+            auth_profile_ref: "default".to_string(),
+            broker_policy_ref: Some("bpr".to_string()),
+            endpoint_ref: Some("ep".to_string()),
+            ..Default::default()
+        },
+    );
+    assert!(resp.ok);
+    assert_eq!(resp.available, Some(true));
+
+    // A non-http(s) scheme on an otherwise allowed host is denied.
+    let resp = auth.handle_status(
+        &plain,
+        &mut budget,
+        HostAuthProfileStatusRequest {
+            auth_profile_ref: "default".to_string(),
+            url: Some("ftp://share.fixture.invalid/api".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(resp.error_code.as_deref(), Some("policy_denied"));
 }
 
 #[test]

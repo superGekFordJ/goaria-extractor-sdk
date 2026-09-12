@@ -993,7 +993,7 @@ fn ref_mode_mock_matching_and_validated_shape_export() {
     let mut broker = MockBroker::new();
     broker.add_rule(simple_hit_rule());
     let req = request();
-    assert!(broker.resolve(&req, &shape).is_some());
+    assert!(broker.resolve(&req, &shape, None).is_some());
 }
 
 // ---------- Boundary and egress-safety regression layer ----------

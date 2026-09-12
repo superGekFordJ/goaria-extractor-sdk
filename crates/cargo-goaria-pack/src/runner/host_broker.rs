@@ -280,7 +280,7 @@ fn broker_failed_response(code: &'static str) -> HostHTTPFetchResponse {
 
 /// True when the manifest is in alias policy-ref mode: an explicit empty
 /// `domains` array plus at least one domain policy ref.
-fn is_alias_manifest(manifest: &Manifest) -> bool {
+pub(crate) fn is_alias_manifest(manifest: &Manifest) -> bool {
     manifest.domains.as_ref().is_some_and(|d| d.is_empty())
         && manifest
             .domain_policy_refs
@@ -861,23 +861,29 @@ fn classify_response(
 /// dots, or escapes), the manifest domain allowlist, plus HTTPS whenever the
 /// hop is extended or carries injected credentials. All failures collapse to
 /// a broker-layer fetch denial.
-fn check_hop_target(
+pub(crate) fn check_hop_target(
     raw_url: &str,
     manifest: &Manifest,
     wants_extended: bool,
     has_auth: bool,
 ) -> Result<Url, FetchDeny> {
     let deny = || FetchDeny::fetch_failed("request target is not allowed by manifest policy");
+    // Require an explicit `://` separator: the url crate normalizes
+    // `https:example.com` into a host-bearing URL the Go gate would reject.
+    let Some((_, after_scheme)) = raw_url.split_once("://") else {
+        return Err(deny());
+    };
     let parsed = Url::parse(raw_url).map_err(|_| deny())?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return Err(deny());
     }
     // Reject userinfo and escaped-authority forms the parser normalizes away
-    // (e.g. `http://@host/`, `https://%65xample.com/`).
-    let authority = raw_url
-        .split_once("://")
-        .and_then(|(_, rest)| rest.split('/').next())
+    // (e.g. `http://@host/`, `https://%65xample.com/`). The authority ends at
+    // the first path/query/fragment delimiter so `?q=a@b` is not misread.
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
         .unwrap_or_default();
     if !parsed.username().is_empty()
         || parsed.password().is_some()
@@ -940,6 +946,32 @@ fn effective_max_response_bytes(req: &HostHTTPFetchRequest, manifest: &Manifest)
 /// Values that must never be reflected back to the guest: pack-owned
 /// privileged header values (plus Authorization credentials segment) and
 /// host-injected auth secrets (plus their name=value form).
+/// Literal byte-level secret replacement for response bodies; works on
+/// arbitrary binary content without UTF-8 loss.
+fn redact_body_bytes(body: &[u8], secrets: &[String]) -> Vec<u8> {
+    let mut out = body.to_vec();
+    for secret in secrets {
+        let needle = secret.as_bytes();
+        if needle.is_empty() || needle.len() > out.len() {
+            continue;
+        }
+        let mut replaced = Vec::with_capacity(out.len());
+        let mut i = 0;
+        while i + needle.len() <= out.len() {
+            if out[i..i + needle.len()] == *needle {
+                replaced.extend_from_slice(REDACTED_MARKER.as_bytes());
+                i += needle.len();
+            } else {
+                replaced.push(out[i]);
+                i += 1;
+            }
+        }
+        replaced.extend_from_slice(&out[i..]);
+        out = replaced;
+    }
+    out
+}
+
 fn collect_known_secrets(
     shape: &ValidatedFetchShape,
     auth_header: Option<(&str, &str)>,
@@ -1206,8 +1238,9 @@ impl MockBroker {
         &self,
         req: &HostHTTPFetchRequest,
         shape: &ValidatedFetchShape,
+        auth_header: Option<(&str, &str)>,
     ) -> Option<HostHTTPFetchResponse> {
-        let known_secrets = collect_known_secrets(shape, None);
+        let known_secrets = collect_known_secrets(shape, auth_header);
         for rule in &self.rules {
             if rule.matches_request(req, shape) {
                 // Only the safe response-header allowlist reaches the guest,
@@ -1238,8 +1271,10 @@ impl MockBroker {
                     status_code: Some(rule.status_code),
                     final_url,
                     headers: (!headers.is_empty()).then_some(headers),
-                    body_base64: (!rule.body.is_empty())
-                        .then(|| base64::engine::general_purpose::STANDARD.encode(&rule.body)),
+                    body_base64: (!rule.body.is_empty()).then(|| {
+                        let redacted_body = redact_body_bytes(&rule.body, &known_secrets);
+                        base64::engine::general_purpose::STANDARD.encode(redacted_body)
+                    }),
                     error_code: None,
                     message: None,
                 });
@@ -1571,7 +1606,7 @@ impl HostBroker {
         // 12. Dispatch
         match self {
             Self::Mock(mock) => {
-                if let Some(resp) = mock.resolve(&req, &shape) {
+                if let Some(resp) = mock.resolve(&req, &shape, auth_header) {
                     resp
                 } else {
                     HostHTTPFetchResponse {
@@ -1605,7 +1640,8 @@ mod tests {
         is_http_token, is_valid_pack_owned_authorization, is_valid_profile_slug,
         normalize_fetch_method, redact_sensitive, validate_auth_profile_ref,
         validate_extended_fetch_shape, validate_pack_headers, validate_ref_params, HopAction,
-        LiveBroker, PublicOnlyResolver, ValidatedFetchShape, SSRF_BLOCKED_MARKER,
+        LiveBroker, MockBroker, MockBrokerRule, PublicOnlyResolver, UrlPattern,
+        ValidatedFetchShape, SSRF_BLOCKED_MARKER,
     };
     use crate::manifest::{DomainRule, Manifest, ResourceLimits};
     use base64::Engine;
@@ -1679,6 +1715,47 @@ mod tests {
         assert_eq!(
             response.error_code.as_deref(),
             Some("ref_mode_not_supported_in_live_runner")
+        );
+    }
+
+    #[test]
+    fn mock_resolve_redacts_injected_auth_secret() {
+        let mut broker = MockBroker::new();
+        let mut headers = BTreeMap::new();
+        headers.insert("etag".to_string(), vec!["v-tok123".to_string()]);
+        broker.add_rule(MockBrokerRule {
+            pattern: UrlPattern::Exact("https://example.com/".to_string()),
+            status_code: 200,
+            headers,
+            body: b"body-tok123".to_vec(),
+            expect: None,
+        });
+        let req = HostHTTPFetchRequest {
+            url: Some("https://example.com/".to_string()),
+            ..Default::default()
+        };
+        let shape = ValidatedFetchShape {
+            method: "GET".to_string(),
+            ..Default::default()
+        };
+
+        let redacted = broker
+            .resolve(&req, &shape, Some(("Authorization", "tok123")))
+            .unwrap();
+        assert_eq!(
+            redacted.headers.as_ref().unwrap()["Etag"],
+            vec!["v-[REDACTED]".to_string()]
+        );
+        let body = base64::engine::general_purpose::STANDARD
+            .decode(redacted.body_base64.unwrap())
+            .unwrap();
+        assert_eq!(body, b"body-[REDACTED]");
+
+        // Without the resolved credential the same fixture leaks through.
+        let plain = broker.resolve(&req, &shape, None).unwrap();
+        assert_eq!(
+            plain.headers.as_ref().unwrap()["Etag"],
+            vec!["v-tok123".to_string()]
         );
     }
 
@@ -1967,6 +2044,7 @@ mod tests {
             "ftp://example.com/x",
             "javascript:alert(1)",
             "data:text/plain,x",
+            "https:example.com",
             "https://user@example.com/",
             "https://user:pw@example.com/",
             "https://@example.com/",
@@ -1976,6 +2054,19 @@ mod tests {
             assert!(
                 check_hop_target(url, &manifest, false, false).is_err(),
                 "{url} should be denied"
+            );
+        }
+
+        // Query and fragment contents are not part of the raw authority.
+        for url in [
+            "https://example.com?q=a@b",
+            "https://example.com?q=%41",
+            "https://example.com#frag@x",
+            "https://example.com?email=user@x.com",
+        ] {
+            assert!(
+                check_hop_target(url, &manifest, false, false).is_ok(),
+                "{url} should pass"
             );
         }
 
