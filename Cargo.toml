@@ -1,8 +1,6 @@
 [workspace]
 members = [
-    "crates/goaria-extractor-macro",
-    "crates/goaria-extractor-sdk",
-    "crates/cargo-goaria-pack",
+    "crates/*",
     "examples/rust_fixture_pack",
 ]
 resolver = "2"
@@ -35,3 +33,9 @@ rand = "0.8"
 zip = { version = "2.2", default-features = false }
 colored = "2.1"
 
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
