@@ -243,7 +243,7 @@ cargo goaria-pack run https://share.fixture.invalid/item/123 --live
 Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Basic fetch requests follow at most 5 redirects with per-hop domain/SSRF re-checks; extended fetch requests (`cap.http.fetch.extended`) fail closed on any redirect and require HTTPS. Auth-bearing requests require an HTTPS target on every hop.
 
 Mock fixtures consumed by `test`/`run` are JSON objects (or arrays of objects) with:
-- exactly one URL pattern: `url`, `exact`, `prefix`, or `pattern` (`prefix`/`pattern` match by string prefix, others by exact match);
+- exactly one URL pattern: `url`, `exact`, `prefix`, or `pattern` (`prefix` matches by string prefix; the other three match exactly);
 - optional `status_code`/`status` (integer 100–599, default `200`);
 - optional `headers` (`name: string | string[]`), `json`, `body_base64`, or `body` shaping the mock response. Only the safe response-header allowlist is exposed to the guest;
 - optional `expect` asserting the outgoing request: `method` (case-insensitive), `headers` (canonical-insensitive name → exact value), `body_base64` (decoded byte equality), `broker_policy_ref`/`endpoint_ref` (exact ref match for ref-mode requests). Every declared field must match or the rule is skipped.
