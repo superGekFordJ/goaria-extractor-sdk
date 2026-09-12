@@ -14,7 +14,8 @@ use crate::manifest::{Manifest, ManifestError};
 pub use crate::runner::auth_provider::AuthProvider;
 use crate::runner::engine::{HostState, WasmEngine};
 pub use crate::runner::host_broker::{
-    HostBroker, LiveBroker, MockBroker, MockBrokerRule, UrlPattern,
+    HostBroker, LiveBroker, MockBroker, MockBrokerRule, MockRequestExpectation, UrlPattern,
+    ValidatedFetchShape,
 };
 pub use crate::runner::limits::{
     HostCallBudget, LimitsError, MAX_ABI_INPUT_BYTES, MAX_HOST_IMPORT_REQUEST_BYTES,

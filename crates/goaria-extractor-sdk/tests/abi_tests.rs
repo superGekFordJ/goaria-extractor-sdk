@@ -136,6 +136,7 @@ fn test_host_http_fetch_request_and_response_dto() {
         url: Some("https://api.fixture.invalid/v1/resource".to_string()),
         method: Some("GET".to_string()),
         headers: Some(headers),
+        body_base64: None,
         timeout_millis: Some(3000),
         auth_profile_ref: None,
         broker_policy_ref: None,
@@ -168,6 +169,88 @@ fn test_host_http_fetch_request_and_response_dto() {
     let parsed_resp: HostHTTPFetchResponse = serde_json::from_str(&resp_json).unwrap();
     assert!(parsed_resp.ok);
     assert_eq!(parsed_resp.status_code, Some(200));
+}
+
+#[test]
+fn test_fetch_request_body_base64_wire_contract() {
+    let req = HostHTTPFetchRequest {
+        method: Some("POST".to_string()),
+        url: Some("https://api.fixture.invalid/v1/submit".to_string()),
+        body_base64: Some("aGVsbG8=".to_string()),
+        ..Default::default()
+    };
+    let json_str = serde_json::to_string(&req).unwrap();
+    assert!(json_str.contains(r#""body_base64":"aGVsbG8=""#));
+
+    let roundtrip: HostHTTPFetchRequest = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(roundtrip, req);
+
+    // omitempty semantics: absent option must not emit the key
+    let bare = HostHTTPFetchRequest {
+        url: Some("https://api.fixture.invalid/v1".to_string()),
+        ..Default::default()
+    };
+    let bare_json = serde_json::to_string(&bare).unwrap();
+    assert!(!bare_json.contains("body_base64"));
+
+    // explicit empty string decodes back to Some("")
+    let decoded: HostHTTPFetchRequest =
+        serde_json::from_str(r#"{"url":"https://api.fixture.invalid/","body_base64":""}"#).unwrap();
+    assert_eq!(decoded.body_base64.as_deref(), Some(""));
+}
+
+#[test]
+fn test_fetch_request_rejects_unknown_body_field() {
+    // deny_unknown_fields must keep rejecting legacy/incorrect body spellings
+    let raw = r#"{"url":"https://api.fixture.invalid/","body":"aGVsbG8="}"#;
+    assert!(serde_json::from_str::<HostHTTPFetchRequest>(raw).is_err());
+}
+
+#[test]
+fn test_capability_constants() {
+    use goaria_extractor_sdk::types::{
+        CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
+        CAPABILITY_PARSE_WASM,
+    };
+    assert_eq!(CAPABILITY_PARSE_WASM, "cap.parse.wasm");
+    assert_eq!(CAPABILITY_HTTP_FETCH, "cap.http.fetch");
+    assert_eq!(CAPABILITY_HTTP_FETCH_EXTENDED, "cap.http.fetch.extended");
+    assert_eq!(CAPABILITY_AUTH_PROFILE, "cap.auth.profile");
+}
+
+#[test]
+fn test_build_post_body_request_shape() {
+    use base64::Engine;
+    use goaria_extractor_sdk::broker::build_post_body_request;
+
+    let req = build_post_body_request(
+        "https://api.fixture.invalid/v1/submit",
+        b"hello",
+        "application/json",
+    );
+    assert_eq!(req.method.as_deref(), Some("POST"));
+    assert_eq!(
+        req.url.as_deref(),
+        Some("https://api.fixture.invalid/v1/submit")
+    );
+    let encoded = req.body_base64.as_deref().unwrap();
+    assert_eq!(encoded, "aGVsbG8=");
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap(),
+        b"hello"
+    );
+    let headers = req.headers.as_ref().unwrap();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(
+        headers.get("Content-Type").map(String::as_str),
+        Some("application/json")
+    );
+    // no ref-mode or auth fields leak into a raw POST request
+    assert!(req.broker_policy_ref.is_none());
+    assert!(req.endpoint_ref.is_none());
+    assert!(req.auth_profile_ref.is_none());
 }
 
 #[test]

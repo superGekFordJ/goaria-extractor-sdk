@@ -35,6 +35,24 @@ pub fn ensure_fetch_success(
     Ok(response)
 }
 
+/// Build a POST request carrying `body` under a single `Content-Type` header.
+/// Shared by `fetch_url_with_body` and tests.
+pub fn build_post_body_request(
+    url: impl Into<String>,
+    body: &[u8],
+    content_type: &str,
+) -> HostHTTPFetchRequest {
+    let mut headers = BTreeMap::new();
+    headers.insert("Content-Type".to_string(), content_type.to_string());
+    HostHTTPFetchRequest {
+        method: Some("POST".to_string()),
+        url: Some(url.into()),
+        headers: Some(headers),
+        body_base64: Some(base64::engine::general_purpose::STANDARD.encode(body)),
+        ..Default::default()
+    }
+}
+
 /// High-level client API for calling GoAria host services.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HostBroker;
@@ -65,6 +83,19 @@ impl HostBroker {
             method: Some("GET".to_string()),
             ..Default::default()
         })
+    }
+
+    /// POST `body` to `url` with a single `Content-Type` header.
+    ///
+    /// Requires the manifest to declare `cap.http.fetch.extended` alongside
+    /// `cap.http.fetch`; the host performs all request validation.
+    pub fn fetch_url_with_body(
+        &self,
+        url: impl Into<String>,
+        body: &[u8],
+        content_type: &str,
+    ) -> Result<HostHTTPFetchResponse, ExtractorError> {
+        self.fetch(&build_post_body_request(url, body, content_type))
     }
 
     /// Fetch an endpoint via alias ref mode.

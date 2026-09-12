@@ -7,6 +7,7 @@ pub const CURRENT_ABI_VERSION: u32 = 1;
 
 pub const CAPABILITY_PARSE_WASM: &str = "cap.parse.wasm";
 pub const CAPABILITY_HTTP_FETCH: &str = "cap.http.fetch";
+pub const CAPABILITY_HTTP_FETCH_EXTENDED: &str = "cap.http.fetch.extended";
 pub const CAPABILITY_AUTH_PROFILE: &str = "cap.auth.profile";
 
 pub const MAX_TIMEOUT_MILLIS: u64 = 10_000;
@@ -68,6 +69,10 @@ impl Capability {
 
     pub fn http_fetch() -> Self {
         Self(CAPABILITY_HTTP_FETCH.to_string())
+    }
+
+    pub fn http_fetch_extended() -> Self {
+        Self(CAPABILITY_HTTP_FETCH_EXTENDED.to_string())
     }
 
     pub fn auth_profile() -> Self {
@@ -354,6 +359,7 @@ pub fn validate_domain_policy_mode(manifest: &Manifest) -> Result<(), ManifestEr
         .as_ref()
         .is_some_and(|r| !r.is_empty());
     let requires_broker_refs = manifest.has_capability(CAPABILITY_HTTP_FETCH)
+        || manifest.has_capability(CAPABILITY_HTTP_FETCH_EXTENDED)
         || manifest.has_capability(CAPABILITY_AUTH_PROFILE);
 
     if has_domains {
@@ -420,11 +426,20 @@ pub fn validate_capabilities(capabilities: &[Capability]) -> Result<(), Manifest
             CAPABILITY_PARSE_WASM => {
                 has_parse_wasm = true;
             }
-            CAPABILITY_HTTP_FETCH | CAPABILITY_AUTH_PROFILE => {}
+            CAPABILITY_HTTP_FETCH | CAPABILITY_HTTP_FETCH_EXTENDED | CAPABILITY_AUTH_PROFILE => {}
             _ => {
                 return Err(ManifestError::DisallowedCapability(cap.0.clone()));
             }
         }
+    }
+    let has_extended = capabilities
+        .iter()
+        .any(|c| c.0 == CAPABILITY_HTTP_FETCH_EXTENDED);
+    let has_basic_fetch = capabilities.iter().any(|c| c.0 == CAPABILITY_HTTP_FETCH);
+    if has_extended && !has_basic_fetch {
+        return Err(ManifestError::MissingCapability(
+            CAPABILITY_HTTP_FETCH.to_string(),
+        ));
     }
     if !has_parse_wasm {
         return Err(ManifestError::MissingParseWasmCapability);

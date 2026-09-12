@@ -1,6 +1,8 @@
 use crate::cli::TestArgs;
 use crate::commands::check::resolve_manifest_and_wasm;
-use crate::runner::{ExtractorRunner, MockBroker, MockBrokerRule, RunnerError, UrlPattern};
+use crate::runner::{
+    ExtractorRunner, MockBroker, MockBrokerRule, MockRequestExpectation, RunnerError, UrlPattern,
+};
 use base64::Engine;
 use colored::Colorize;
 use std::collections::BTreeMap;
@@ -101,6 +103,7 @@ fn add_single_fixture_rule(
                 | "json"
                 | "body_base64"
                 | "body"
+                | "expect"
         ) {
             return Err(fixture_error(
                 path,
@@ -236,13 +239,122 @@ fn add_single_fixture_rule(
         Vec::new()
     };
 
+    let expect = match object.get("expect") {
+        Some(value) => Some(parse_request_expectation(path, value)?),
+        None => None,
+    };
+
     broker.add_rule(MockBrokerRule {
         pattern,
         status_code,
         headers,
         body,
+        expect,
     });
     Ok(())
+}
+
+/// Parse the `expect` sub-object of a fixture rule. Note that `headers` and
+/// `body_base64` inside `expect` assert the outgoing request, unlike the
+/// same-named top-level keys which shape the mock response.
+fn parse_request_expectation(
+    path: &Path,
+    value: &serde_json::Value,
+) -> Result<MockRequestExpectation, TestCommandError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| fixture_error(path, "fixture 'expect' must be an object"))?;
+    for field in object.keys() {
+        if !matches!(
+            field.as_str(),
+            "method" | "headers" | "body_base64" | "broker_policy_ref" | "endpoint_ref"
+        ) {
+            return Err(fixture_error(
+                path,
+                format!("unknown expect field '{field}'"),
+            ));
+        }
+    }
+
+    let method = match object.get("method") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| fixture_error(path, "expect.method must be a string"))?
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    let mut headers = BTreeMap::new();
+    if let Some(value) = object.get("headers") {
+        let header_object = value
+            .as_object()
+            .ok_or_else(|| fixture_error(path, "expect.headers must be an object"))?;
+        for (name, value) in header_object {
+            if !is_valid_header_name(name) {
+                return Err(fixture_error(
+                    path,
+                    format!("invalid expect header name '{name}'"),
+                ));
+            }
+            let value = value.as_str().ok_or_else(|| {
+                fixture_error(path, format!("expect header '{name}' must be a string"))
+            })?;
+            if !is_valid_header_value(value) {
+                return Err(fixture_error(
+                    path,
+                    format!("expect header '{name}' contains an invalid value"),
+                ));
+            }
+            headers.insert(name.trim().to_lowercase(), value.to_string());
+        }
+    }
+
+    let body_base64 = match object.get("body_base64") {
+        Some(value) => {
+            let encoded = value
+                .as_str()
+                .ok_or_else(|| fixture_error(path, "expect.body_base64 must be a string"))?;
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    fixture_error(
+                        path,
+                        format!("invalid base64 in expect.body_base64: {error}"),
+                    )
+                })?;
+            Some(encoded.to_string())
+        }
+        None => None,
+    };
+
+    let broker_policy_ref = match object.get("broker_policy_ref") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| fixture_error(path, "expect.broker_policy_ref must be a string"))?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let endpoint_ref = match object.get("endpoint_ref") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| fixture_error(path, "expect.endpoint_ref must be a string"))?
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    Ok(MockRequestExpectation {
+        method,
+        headers,
+        body_base64,
+        broker_policy_ref,
+        endpoint_ref,
+    })
 }
 
 fn required_fixture_string<'a>(

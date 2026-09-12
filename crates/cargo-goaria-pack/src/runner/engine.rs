@@ -1,7 +1,12 @@
-use wasmi::{Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, StoreLimits};
+use wasmi::{
+    AsContext, Caller, Config, Engine, Extern, Instance, Linker, Memory, Module, Store, StoreLimits,
+};
 
 use goaria_extractor_sdk::abi::pack_result;
-use goaria_extractor_sdk::types::{HostAuthProfileStatusRequest, HostHTTPFetchRequest};
+use goaria_extractor_sdk::types::{
+    HostAuthProfileStatusRequest, HostAuthProfileStatusResponse, HostHTTPFetchRequest,
+    HostHTTPFetchResponse,
+};
 
 use crate::manifest::Manifest;
 use crate::runner::auth_provider::AuthProvider;
@@ -15,6 +20,67 @@ const FUEL_UNITS_PER_TIMEOUT_MILLI: u64 = 1_000_000;
 
 fn approximate_instruction_budget(timeout_millis: u64) -> u64 {
     timeout_millis.saturating_mul(FUEL_UNITS_PER_TIMEOUT_MILLI)
+}
+
+/// Decode a fetch request body; failure yields the wire error response the
+/// host would return for malformed request JSON instead of a null result.
+fn decode_fetch_request(req_bytes: &[u8]) -> Result<HostHTTPFetchRequest, HostHTTPFetchResponse> {
+    serde_json::from_slice(req_bytes).map_err(|error| HostHTTPFetchResponse {
+        ok: false,
+        error_code: Some("invalid_request".to_string()),
+        message: Some(error.to_string()),
+        ..Default::default()
+    })
+}
+
+/// Same decode-error contract for the auth_profile_status import.
+fn decode_status_request(
+    req_bytes: &[u8],
+) -> Result<HostAuthProfileStatusRequest, HostAuthProfileStatusResponse> {
+    serde_json::from_slice(req_bytes).map_err(|error| HostAuthProfileStatusResponse {
+        ok: false,
+        error_code: Some("invalid_request".to_string()),
+        message: Some(error.to_string()),
+        ..Default::default()
+    })
+}
+
+/// Serialize the response, allocate guest memory via `goaria_alloc`, copy the
+/// bytes in, and return the packed ptr/len handle; 0 on any failure.
+fn write_guest_response(
+    caller: &mut Caller<'_, HostState>,
+    memory: &Memory,
+    resp_bytes: Vec<u8>,
+) -> i64 {
+    if resp_bytes.is_empty() || resp_bytes.len() > MAX_HOST_IMPORT_RESPONSE_BYTES {
+        return 0;
+    }
+
+    let alloc_func = match caller
+        .get_export("goaria_alloc")
+        .and_then(Extern::into_func)
+    {
+        Some(f) => match f.typed::<i32, i32>(caller.as_context()) {
+            Ok(tf) => tf,
+            Err(_) => return 0,
+        },
+        None => return 0,
+    };
+
+    let resp_len = resp_bytes.len() as i32;
+    let resp_ptr = match alloc_func.call(&mut *caller, resp_len) {
+        Ok(ptr) if ptr > 0 => ptr as u32,
+        _ => return 0,
+    };
+
+    if memory
+        .write(&mut *caller, resp_ptr as usize, &resp_bytes)
+        .is_err()
+    {
+        return 0;
+    }
+
+    pack_result(resp_ptr, resp_len as u32) as i64
 }
 
 /// Mutable state passed into the wasmi Store.
@@ -84,9 +150,12 @@ impl WasmEngine {
                     return 0;
                 }
 
-                let req: HostHTTPFetchRequest = match serde_json::from_slice(&req_bytes) {
+                let req: HostHTTPFetchRequest = match decode_fetch_request(&req_bytes) {
                     Ok(r) => r,
-                    Err(_) => return 0,
+                    Err(resp) => {
+                        let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+                        return write_guest_response(&mut caller, &memory, bytes);
+                    }
                 };
 
                 let manifest = caller.data().manifest.clone();
@@ -102,36 +171,7 @@ impl WasmEngine {
                     Err(_) => return 0,
                 };
 
-                if resp_bytes.len() > MAX_HOST_IMPORT_RESPONSE_BYTES {
-                    return 0;
-                }
-
-                // Allocate response buffer in guest memory
-                let alloc_func = match caller
-                    .get_export("goaria_alloc")
-                    .and_then(Extern::into_func)
-                {
-                    Some(f) => match f.typed::<i32, i32>(&caller) {
-                        Ok(tf) => tf,
-                        Err(_) => return 0,
-                    },
-                    None => return 0,
-                };
-
-                let resp_len = resp_bytes.len() as i32;
-                let resp_ptr = match alloc_func.call(&mut caller, resp_len) {
-                    Ok(ptr) if ptr > 0 => ptr as u32,
-                    _ => return 0,
-                };
-
-                if memory
-                    .write(&mut caller, resp_ptr as usize, &resp_bytes)
-                    .is_err()
-                {
-                    return 0;
-                }
-
-                pack_result(resp_ptr, resp_len as u32) as i64
+                write_guest_response(&mut caller, &memory, resp_bytes)
             },
         )?;
 
@@ -158,9 +198,12 @@ impl WasmEngine {
                     return 0;
                 }
 
-                let req: HostAuthProfileStatusRequest = match serde_json::from_slice(&req_bytes) {
+                let req: HostAuthProfileStatusRequest = match decode_status_request(&req_bytes) {
                     Ok(r) => r,
-                    Err(_) => return 0,
+                    Err(resp) => {
+                        let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+                        return write_guest_response(&mut caller, &memory, bytes);
+                    }
                 };
 
                 let manifest = caller.data().manifest.clone();
@@ -175,31 +218,7 @@ impl WasmEngine {
                     Err(_) => return 0,
                 };
 
-                let alloc_func = match caller
-                    .get_export("goaria_alloc")
-                    .and_then(Extern::into_func)
-                {
-                    Some(f) => match f.typed::<i32, i32>(&caller) {
-                        Ok(tf) => tf,
-                        Err(_) => return 0,
-                    },
-                    None => return 0,
-                };
-
-                let resp_len = resp_bytes.len() as i32;
-                let resp_ptr = match alloc_func.call(&mut caller, resp_len) {
-                    Ok(ptr) if ptr > 0 => ptr as u32,
-                    _ => return 0,
-                };
-
-                if memory
-                    .write(&mut caller, resp_ptr as usize, &resp_bytes)
-                    .is_err()
-                {
-                    return 0;
-                }
-
-                pack_result(resp_ptr, resp_len as u32) as i64
+                write_guest_response(&mut caller, &memory, resp_bytes)
             },
         )?;
 
@@ -220,7 +239,25 @@ impl WasmEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::approximate_instruction_budget;
+    use super::{approximate_instruction_budget, decode_fetch_request, decode_status_request};
+
+    #[test]
+    fn decode_failures_produce_invalid_request_responses() {
+        for bad in [
+            &b"{not json"[..],
+            br#"{"url":"https://example.com","bogus":1}"#,
+            br#"{"url":"https://example.com"} trailing"#,
+        ] {
+            let err = decode_fetch_request(bad).unwrap_err();
+            assert!(!err.ok);
+            assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        }
+        assert!(decode_fetch_request(br#"{"url":"https://example.com"}"#).is_ok());
+
+        let err = decode_status_request(b"{]").unwrap_err();
+        assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        assert!(decode_status_request(br#"{"auth_profile_ref":"p1"}"#).is_ok());
+    }
 
     #[test]
     fn instruction_budget_scales_without_a_hidden_minimum() {

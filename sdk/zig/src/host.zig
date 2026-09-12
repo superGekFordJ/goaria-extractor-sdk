@@ -88,6 +88,32 @@ pub const HostBroker = struct {
         });
     }
 
+    /// POST `body` to `url` with a single `Content-Type` header.
+    ///
+    /// Requires the manifest to declare `cap.http.fetch.extended` alongside
+    /// `cap.http.fetch`; the host performs all request validation.
+    pub fn fetchUrlWithBody(
+        allocator: std.mem.Allocator,
+        url: []const u8,
+        body: []const u8,
+        content_type: []const u8,
+    ) Error!std.json.Parsed(types.HostHTTPFetchResponse) {
+        var req = try buildPostBodyRequest(allocator, url, body, content_type);
+        defer freePostBodyRequest(allocator, &req);
+        return fetch(allocator, req);
+    }
+
+    /// Fetch an endpoint via alias ref mode (broker_policy_ref + endpoint_ref,
+    /// optional substitution params).
+    pub fn fetchRef(
+        allocator: std.mem.Allocator,
+        broker_policy_ref: []const u8,
+        endpoint_ref: []const u8,
+        params: ?types.StringMap,
+    ) Error!std.json.Parsed(types.HostHTTPFetchResponse) {
+        return fetch(allocator, buildRefRequest(broker_policy_ref, endpoint_ref, params));
+    }
+
     /// Fetch and decode the response body as raw bytes.
     pub fn fetchBytes(
         allocator: std.mem.Allocator,
@@ -158,6 +184,46 @@ pub const HostBroker = struct {
     }
 };
 
+fn buildPostBodyRequest(
+    allocator: std.mem.Allocator,
+    url: []const u8,
+    body: []const u8,
+    content_type: []const u8,
+) HostBroker.Error!types.HostHTTPFetchRequest {
+    const encoder = std.base64.standard.Encoder;
+    const b64_buf = allocator.alloc(u8, encoder.calcSize(body.len)) catch return HostBroker.Error.HostCallFailed;
+    errdefer allocator.free(b64_buf);
+    _ = encoder.encode(b64_buf, body);
+
+    var headers: types.StringMap = .{};
+    errdefer headers.map.deinit(allocator);
+    headers.map.put(allocator, "Content-Type", content_type) catch return HostBroker.Error.HostCallFailed;
+
+    return .{
+        .method = "POST",
+        .url = url,
+        .headers = headers,
+        .body_base64 = b64_buf,
+    };
+}
+
+fn freePostBodyRequest(allocator: std.mem.Allocator, req: *types.HostHTTPFetchRequest) void {
+    if (req.body_base64) |b64| allocator.free(b64);
+    if (req.headers) |*headers| headers.map.deinit(allocator);
+}
+
+fn buildRefRequest(
+    broker_policy_ref: []const u8,
+    endpoint_ref: []const u8,
+    params: ?types.StringMap,
+) types.HostHTTPFetchRequest {
+    return .{
+        .broker_policy_ref = broker_policy_ref,
+        .endpoint_ref = endpoint_ref,
+        .params = if (params) |p| (if (p.map.count() == 0) null else p) else null,
+    };
+}
+
 // Unit Tests
 test "base64 decoding helper" {
     const encoded = "aGVsbG8gd29ybGQ=";
@@ -168,4 +234,52 @@ test "base64 decoding helper" {
 
     try decoder.decode(buf, encoded);
     try std.testing.expectEqualStrings("hello world", buf);
+}
+
+test "buildPostBodyRequest produces POST + body_base64 + single Content-Type" {
+    const allocator = std.testing.allocator;
+    var req = try buildPostBodyRequest(
+        allocator,
+        "https://api.fixture.invalid/v1/submit",
+        "hello",
+        "application/json",
+    );
+    defer freePostBodyRequest(allocator, &req);
+
+    const req_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(req, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(req_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"method\":\"POST\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"url\":\"https://api.fixture.invalid/v1/submit\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"body_base64\":\"aGVsbG8=\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"Content-Type\":\"application/json\"") != null);
+    // raw mode must not leak ref/auth fields
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "broker_policy_ref") == null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "auth_profile_ref") == null);
+}
+
+test "buildRefRequest emits refs only and drops empty params" {
+    const allocator = std.testing.allocator;
+
+    const no_params = buildRefRequest("bpr-custom01", "ep-custom01", null);
+    const req_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(no_params, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(req_json);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"broker_policy_ref\":\"bpr-custom01\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"endpoint_ref\":\"ep-custom01\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "params") == null);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "url") == null);
+
+    // empty params map collapses to absent (mirror of Rust fetch_ref)
+    var empty: types.StringMap = .{};
+    defer empty.map.deinit(allocator);
+    const with_empty = buildRefRequest("bpr-custom01", "ep-custom01", empty);
+    try std.testing.expect(with_empty.params == null);
 }

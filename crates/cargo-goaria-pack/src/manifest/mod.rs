@@ -1,6 +1,7 @@
 pub mod schema;
 
 pub use schema::{
-    Capability, DomainRule, Manifest, ManifestError, ResourceLimits, CAPABILITY_AUTH_PROFILE,
-    CAPABILITY_HTTP_FETCH, CAPABILITY_PARSE_WASM, CURRENT_ABI_VERSION,
+    validate_opaque_policy_ref, Capability, DomainRule, Manifest, ManifestError, ResourceLimits,
+    CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
+    CAPABILITY_PARSE_WASM, CURRENT_ABI_VERSION,
 };

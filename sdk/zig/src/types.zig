@@ -1,5 +1,15 @@
 const std = @import("std");
 
+/// Manifest capability: compile and instantiate the WebAssembly payload.
+pub const CAPABILITY_PARSE_WASM = "cap.parse.wasm";
+/// Manifest capability: invoke goaria_host.http_fetch (GET/HEAD, safe headers).
+pub const CAPABILITY_HTTP_FETCH = "cap.http.fetch";
+/// Manifest capability: extended fetch features (POST, request body,
+/// pack-owned Authorization or X-* headers). Requires cap.http.fetch.
+pub const CAPABILITY_HTTP_FETCH_EXTENDED = "cap.http.fetch.extended";
+/// Manifest capability: use host-custody auth profiles.
+pub const CAPABILITY_AUTH_PROFILE = "cap.auth.profile";
+
 /// Key-value string map (e.g. metadata, params, request headers).
 pub const StringMap = std.json.ArrayHashMap([]const u8);
 
@@ -92,6 +102,7 @@ pub const HostHTTPFetchRequest = struct {
     endpoint_ref: ?[]const u8 = null,
     params: ?StringMap = null,
     headers: ?StringMap = null,
+    body_base64: ?[]const u8 = null,
     auth_profile_ref: ?[]const u8 = null,
     timeout_millis: ?i32 = null,
     max_response_bytes: ?i64 = null,
@@ -185,6 +196,52 @@ test "ExtractInput parsing and ExtractOutput serialization" {
     defer allocator.free(out_json);
     try std.testing.expect(std.mem.indexOf(u8, out_json, "\"id\":\"item-01\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_json, "\"size_bytes\":2048") != null);
+}
+
+test "HostHTTPFetchRequest body_base64 wire contract" {
+    const allocator = std.testing.allocator;
+
+    const req = HostHTTPFetchRequest{
+        .method = "POST",
+        .url = "https://api.fixture.invalid/v1/submit",
+        .body_base64 = "aGVsbG8=",
+    };
+    const req_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(req, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(req_json);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"body_base64\":\"aGVsbG8=\"") != null);
+
+    const parsed = try std.json.parseFromSlice(
+        HostHTTPFetchRequest,
+        allocator,
+        req_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("aGVsbG8=", parsed.value.body_base64.?);
+
+    // null must not emit the key (omitempty parity)
+    const bare = HostHTTPFetchRequest{ .url = "https://api.fixture.invalid/" };
+    const bare_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(bare, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(bare_json);
+    try std.testing.expect(std.mem.indexOf(u8, bare_json, "body_base64") == null);
+
+    // explicit null parses back to absent
+    const explicit_null = try std.json.parseFromSlice(
+        HostHTTPFetchRequest,
+        allocator,
+        "{\"url\":\"https://api.fixture.invalid/\",\"body_base64\":null}",
+        .{ .ignore_unknown_fields = true },
+    );
+    defer explicit_null.deinit();
+    try std.testing.expect(explicit_null.value.body_base64 == null);
 }
 
 test "HostHTTPFetchResponse parsing" {

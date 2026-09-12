@@ -14,6 +14,11 @@ pub const AuthSecretKind = types.AuthSecretKind;
 pub const StringMap = types.StringMap;
 pub const HeaderMap = types.HeaderMap;
 
+pub const CAPABILITY_PARSE_WASM = types.CAPABILITY_PARSE_WASM;
+pub const CAPABILITY_HTTP_FETCH = types.CAPABILITY_HTTP_FETCH;
+pub const CAPABILITY_HTTP_FETCH_EXTENDED = types.CAPABILITY_HTTP_FETCH_EXTENDED;
+pub const CAPABILITY_AUTH_PROFILE = types.CAPABILITY_AUTH_PROFILE;
+
 pub const HostHTTPFetchRequest = types.HostHTTPFetchRequest;
 pub const HostHTTPFetchResponse = types.HostHTTPFetchResponse;
 pub const HostAuthProfileStatusRequest = types.HostAuthProfileStatusRequest;

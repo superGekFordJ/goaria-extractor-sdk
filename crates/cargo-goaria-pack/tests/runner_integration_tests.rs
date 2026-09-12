@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use cargo_goaria_pack::runner::host_broker::is_restricted_ip;
 use cargo_goaria_pack::{
     Capability, DomainRule, Manifest, ManifestError, ResourceLimits, CAPABILITY_AUTH_PROFILE,
+    CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED, CAPABILITY_PARSE_WASM,
 };
 use goaria_extractor_sdk::types::{
     AuthSecretKind, HostAuthProfileStatusRequest, HostHTTPFetchRequest,
@@ -211,6 +212,111 @@ fn test_manifest_missing_required_fields_fails() {
     assert!(serde_json::from_str::<Manifest>(json_missing_subfield).is_err());
 }
 
+fn base_manifest() -> Manifest {
+    Manifest {
+        pack_id: "test-pack".to_string(),
+        pack_version: "0.1.0".to_string(),
+        abi_version: 1,
+        description: None,
+        capabilities: vec![Capability::parse_wasm()],
+        domains: Some(vec![DomainRule {
+            host: "fixture.invalid".to_string(),
+            include_subdomains: false,
+        }]),
+        domain_policy_refs: None,
+        broker_policy_refs: None,
+        resource_limits: ResourceLimits::default(),
+        payload_sha256: None,
+    }
+}
+
+fn alias_manifest() -> Manifest {
+    let mut manifest = base_manifest();
+    manifest.domains = Some(vec![]);
+    manifest.domain_policy_refs = Some(vec!["dpr-sample01".to_string()]);
+    manifest.broker_policy_refs = Some(vec!["bpr-sample01".to_string()]);
+    manifest
+}
+
+#[test]
+fn test_extended_capability_requires_basic_fetch() {
+    // extended alongside basic fetch + legacy domains validates
+    let mut manifest = base_manifest();
+    manifest.capabilities = vec![
+        Capability::parse_wasm(),
+        Capability::http_fetch(),
+        Capability::http_fetch_extended(),
+    ];
+    assert_eq!(manifest.validate_runnable(), Ok(()));
+
+    // extended without basic fetch is rejected
+    manifest.capabilities = vec![Capability::parse_wasm(), Capability::http_fetch_extended()];
+    assert_eq!(
+        manifest.validate_runnable(),
+        Err(ManifestError::MissingCapability(
+            CAPABILITY_HTTP_FETCH.to_string()
+        ))
+    );
+
+    // unknown capability still rejected
+    manifest.capabilities = vec![
+        Capability::parse_wasm(),
+        Capability("cap.not.real".to_string()),
+    ];
+    assert_eq!(
+        manifest.validate_runnable(),
+        Err(ManifestError::DisallowedCapability(
+            "cap.not.real".to_string()
+        ))
+    );
+}
+
+#[test]
+fn test_extended_capability_alias_manifest_broker_refs() {
+    // alias manifest with extended but missing broker_policy_refs is rejected
+    let mut manifest = alias_manifest();
+    manifest.capabilities = vec![
+        Capability::parse_wasm(),
+        Capability::http_fetch(),
+        Capability::http_fetch_extended(),
+    ];
+    manifest.broker_policy_refs = None;
+    assert_eq!(
+        manifest.validate_runnable(),
+        Err(ManifestError::InvalidDomainPolicyMode(
+            "alias manifest with http or auth capability must declare at least one broker_policy_ref"
+                .to_string()
+        ))
+    );
+
+    // alias manifest declaring extended (with basic) + refs validates
+    let mut manifest = alias_manifest();
+    manifest.capabilities = vec![
+        Capability::parse_wasm(),
+        Capability::http_fetch(),
+        Capability::http_fetch_extended(),
+    ];
+    assert_eq!(manifest.validate_runnable(), Ok(()));
+
+    // extended alone (implying basic declared) still requires broker refs
+    let mut manifest = alias_manifest();
+    manifest.capabilities = vec![Capability::parse_wasm(), Capability::http_fetch_extended()];
+    assert_eq!(
+        manifest.validate_runnable(),
+        Err(ManifestError::MissingCapability(
+            CAPABILITY_HTTP_FETCH.to_string()
+        ))
+    );
+}
+
+#[test]
+fn test_capability_constant_values() {
+    assert_eq!(CAPABILITY_PARSE_WASM, "cap.parse.wasm");
+    assert_eq!(CAPABILITY_HTTP_FETCH, "cap.http.fetch");
+    assert_eq!(CAPABILITY_HTTP_FETCH_EXTENDED, "cap.http.fetch.extended");
+    assert_eq!(CAPABILITY_AUTH_PROFILE, "cap.auth.profile");
+}
+
 #[test]
 fn test_is_restricted_ip() {
     // IPv4 Restricted
@@ -257,6 +363,7 @@ fn test_mock_broker_matching() {
         status_code: 200,
         headers: Default::default(),
         body: serde_json::to_vec(&serde_json::json!({ "id": 42, "title": "Test Item" })).unwrap(),
+        expect: None,
     });
 
     broker.add_rule(cargo_goaria_pack::runner::MockBrokerRule {
@@ -264,7 +371,13 @@ fn test_mock_broker_matching() {
         status_code: 200,
         headers: Default::default(),
         body: b"raw-data".to_vec(),
+        expect: None,
     });
+
+    let get_shape = cargo_goaria_pack::runner::ValidatedFetchShape {
+        method: "GET".to_string(),
+        ..Default::default()
+    };
 
     let req_exact = HostHTTPFetchRequest {
         url: Some("https://share.fixture.invalid/api/item/42".to_string()),
@@ -272,7 +385,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp = broker
-        .resolve(&req_exact)
+        .resolve(&req_exact, &get_shape)
         .expect("should resolve exact match");
     assert!(resp.ok);
     assert_eq!(resp.status_code, Some(200));
@@ -283,7 +396,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp_prefix = broker
-        .resolve(&req_prefix)
+        .resolve(&req_prefix, &get_shape)
         .expect("should resolve prefix match");
     assert!(resp_prefix.ok);
 
@@ -291,7 +404,7 @@ fn test_mock_broker_matching() {
         url: Some("https://share.fixture.invalid/not-found".to_string()),
         ..Default::default()
     };
-    assert!(broker.resolve(&req_unmatched).is_none());
+    assert!(broker.resolve(&req_unmatched, &get_shape).is_none());
 }
 
 #[test]

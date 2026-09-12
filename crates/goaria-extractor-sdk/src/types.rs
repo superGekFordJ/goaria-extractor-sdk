@@ -1,6 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Manifest capability: compile and instantiate the WebAssembly payload.
+pub const CAPABILITY_PARSE_WASM: &str = "cap.parse.wasm";
+/// Manifest capability: invoke goaria_host.http_fetch (GET/HEAD, safe headers).
+pub const CAPABILITY_HTTP_FETCH: &str = "cap.http.fetch";
+/// Manifest capability: extended fetch features (POST, request body,
+/// pack-owned Authorization or X-* headers). Requires cap.http.fetch.
+pub const CAPABILITY_HTTP_FETCH_EXTENDED: &str = "cap.http.fetch.extended";
+/// Manifest capability: use host-custody auth profiles.
+pub const CAPABILITY_AUTH_PROFILE: &str = "cap.auth.profile";
+
 /// Input payload passed to goaria_match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -124,6 +134,8 @@ pub struct HostHTTPFetchRequest {
     pub params: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<BTreeMap<String, String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_base64: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_profile_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
