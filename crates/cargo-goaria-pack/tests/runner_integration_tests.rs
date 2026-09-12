@@ -448,8 +448,9 @@ fn test_auth_provider_simulation() {
         ..Default::default()
     };
     let resp_missing = auth.handle_status(&manifest, &mut budget, req_missing);
-    assert!(resp_missing.ok);
+    assert!(!resp_missing.ok);
     assert_eq!(resp_missing.available, Some(false));
+    assert_eq!(resp_missing.error_code.as_deref(), Some("auth_unavailable"));
 }
 
 #[test]

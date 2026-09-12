@@ -307,7 +307,16 @@ fn parse_request_expectation(
                     format!("expect header '{name}' contains an invalid value"),
                 ));
             }
-            headers.insert(name.trim().to_lowercase(), value.to_string());
+            let lower = name.trim().to_lowercase();
+            if headers.contains_key(&lower) {
+                return Err(fixture_error(
+                    path,
+                    format!(
+                        "expect header '{name}' duplicates another name after canonicalization"
+                    ),
+                ));
+            }
+            headers.insert(lower, value.to_string());
         }
     }
 

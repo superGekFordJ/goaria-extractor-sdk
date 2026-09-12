@@ -6,11 +6,13 @@ use crate::runner::auth_provider::AuthProvider;
 use crate::runner::limits::{HostCallBudget, MAX_HOST_IMPORT_RESPONSE_BYTES};
 use base64::Engine;
 use goaria_extractor_sdk::types::{HostHTTPFetchRequest, HostHTTPFetchResponse};
+use regex::Regex;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use url::Url;
+use url::{Host, Url};
 
 /// Request headers a pack may set without the extended fetch capability
 /// (canonical-lower names; mirrors the host broker allowlist).
@@ -97,15 +99,101 @@ const MIN_SECRET_REFLECTION_BYTES: usize = 8;
 const REDIRECT_LIMIT: u32 = 5;
 const MAX_FETCH_TIMEOUT_MILLIS: u64 = 10_000;
 const DEFAULT_FETCH_TIMEOUT_MILLIS: u64 = 5_000;
+const REDACTED_MARKER: &str = "[REDACTED]";
+const MAX_REF_PARAMS: usize = 16;
+const MAX_REF_PARAM_KEY_BYTES: usize = 32;
+const MAX_REF_PARAM_VALUE_BYTES: usize = 512;
+
+/// Query keys whose values are always treated as secret-shaped when a URL is
+/// exposed back to the guest (mirrors the host's tokenLikeQueryKeys).
+const TOKEN_LIKE_QUERY_KEYS: &[&str] = &[
+    "access_token",
+    "api_key",
+    "auth",
+    "credential",
+    "key",
+    "policy",
+    "secret",
+    "sig",
+    "signature",
+    "token",
+    "x-api-key",
+];
+
+fn sensitive_header_start_pattern() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(authorization|cookie|set-cookie|proxy-authorization|x-[a-z0-9-]*(?:api[-_]?key|auth|token|secret)[a-z0-9-]*)\s*[:=]\s*",
+        )
+        .expect("sensitive header pattern")
+    })
+}
+
+/// Replace every occurrence of a known secret plus token-like `?key=` query
+/// values and `Name: value` credential spans inside a value that will be
+/// exposed to the guest (mirrors the host's RedactSensitive).
+pub(crate) fn redact_sensitive(input: &str, known_secrets: &[String]) -> String {
+    let mut redacted = input.to_string();
+    for secret in known_secrets {
+        if !secret.is_empty() {
+            redacted = redacted.replace(secret.as_str(), REDACTED_MARKER);
+        }
+    }
+    let redacted = redact_query_secrets(&redacted);
+    redact_sensitive_header_values(&redacted)
+}
+
+fn redact_query_secrets(input: &str) -> String {
+    let mut out = input.to_string();
+    for key in TOKEN_LIKE_QUERY_KEYS {
+        let pattern = format!(r"(?i)([?&;]{}=)([^&#;\s]+)", regex::escape(key));
+        if let Ok(re) = Regex::new(&pattern) {
+            out = re
+                .replace_all(&out, format!("${{1}}{REDACTED_MARKER}"))
+                .into_owned();
+        }
+    }
+    out
+}
+
+fn redact_sensitive_header_values(input: &str) -> String {
+    let re = sensitive_header_start_pattern();
+    let mut out = String::with_capacity(input.len());
+    let mut offset = 0;
+    while offset < input.len() {
+        let Some(loc) = re.find_at(input, offset) else {
+            break;
+        };
+        out.push_str(&input[offset..loc.start()]);
+        let prefix = input[loc.start()..loc.end()].trim_end_matches([' ', '\t']);
+        out.push_str(prefix);
+        out.push(' ');
+        out.push_str(REDACTED_MARKER);
+
+        let mut value_end = input[loc.end()..]
+            .find(['\r', '\n'])
+            .map(|i| loc.end() + i)
+            .unwrap_or(input.len());
+        if let Some(next) = re.find_at(input, loc.end()) {
+            if next.start() < value_end {
+                value_end = next.start();
+            }
+        }
+        offset = value_end;
+    }
+    out.push_str(&input[offset..]);
+    out
+}
 
 /// Internal fetch rejection: wire error category plus diagnostic detail.
 /// Broker-layer categories (fetch_failed/authenticated_fetch_failed) emit a
 /// fixed static wire message; `message` is only surfaced for detail-carrying
 /// categories like invalid_request/policy_denied.
 #[derive(Debug)]
-struct FetchDeny {
-    error_code: &'static str,
-    message: String,
+pub(crate) struct FetchDeny {
+    pub(crate) error_code: &'static str,
+    pub(crate) message: String,
 }
 
 impl FetchDeny {
@@ -119,6 +207,13 @@ impl FetchDeny {
     fn fetch_failed(message: impl Into<String>) -> Self {
         Self {
             error_code: "fetch_failed",
+            message: message.into(),
+        }
+    }
+
+    fn policy_denied(message: impl Into<String>) -> Self {
+        Self {
+            error_code: "policy_denied",
             message: message.into(),
         }
     }
@@ -287,24 +382,134 @@ fn is_lower_slug_edge(b: u8) -> bool {
     b.is_ascii_lowercase() || b.is_ascii_digit()
 }
 
-fn validate_auth_profile_ref(id: &str) -> Result<(), FetchDeny> {
+/// Lower-slug predicate shared with the auth profile status handler.
+pub(crate) fn is_valid_profile_slug(id: &str) -> bool {
     let bytes = id.as_bytes();
     if bytes.is_empty() || bytes.len() > 64 {
-        return Err(FetchDeny::invalid_request(
-            "auth profile_id length must be between 1 and 64 characters",
-        ));
+        return false;
     }
     if !is_lower_slug_edge(bytes[0]) || !is_lower_slug_edge(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes.len() < 3
+        || bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|&b| is_lower_slug_edge(b) || b == b'-')
+}
+
+/// `Some("")` on optional string fields is treated as absent, matching the
+/// host's `omitempty`-style handling of empty optional values.
+fn opt_nonempty(value: &Option<String>) -> Option<&str> {
+    value.as_deref().filter(|v| !v.is_empty())
+}
+
+fn validate_auth_profile_ref(id: &str) -> Result<(), FetchDeny> {
+    if !is_valid_profile_slug(id) {
         return Err(FetchDeny::invalid_request(
-            "auth profile_id must start and end with a lowercase letter or digit",
+            "auth profile_id must be a lowercase slug of 1-64 characters",
         ));
     }
-    for &b in &bytes[1..bytes.len() - 1] {
-        if !is_lower_slug_edge(b) && b != b'-' {
+    Ok(())
+}
+
+/// Host-policy placeholder key shape: lower-slug edges with interior '-'.
+fn is_ref_param_placeholder_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    if !is_lower_slug_edge(bytes[0]) || !is_lower_slug_edge(bytes[bytes.len() - 1]) {
+        return false;
+    }
+    bytes.len() < 3
+        || bytes[1..bytes.len() - 1]
+            .iter()
+            .all(|&b| is_lower_slug_edge(b) || b == b'-')
+}
+
+fn is_sensitive_ref_param_key(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    if matches!(lower.as_str(), "key" | "api-key" | "apikey") {
+        return true;
+    }
+    [
+        "token",
+        "secret",
+        "auth",
+        "cookie",
+        "header",
+        "credential",
+        "password",
+        "passwd",
+        "bearer",
+        "session",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+/// Ref-mode params gate (mirrors the host's
+/// validateHostPolicyEndpointParams): bounded count/length, trimmed UTF-8
+/// control-free text, placeholder-shaped non-sensitive keys, and values that
+/// carry no URL or credential syntax.
+pub(crate) fn validate_ref_params(params: &BTreeMap<String, String>) -> Result<(), FetchDeny> {
+    if params.len() > MAX_REF_PARAMS {
+        return Err(FetchDeny::invalid_request(format!(
+            "params must contain at most {MAX_REF_PARAMS} entries"
+        )));
+    }
+    for (key, value) in params {
+        if key.is_empty() || key.len() > MAX_REF_PARAM_KEY_BYTES {
             return Err(FetchDeny::invalid_request(format!(
-                "auth profile_id contains invalid character {:?}",
-                b as char
+                "param key length must be between 1 and {MAX_REF_PARAM_KEY_BYTES} bytes"
             )));
+        }
+        if key.trim() != key || string_contains_control(key) {
+            return Err(FetchDeny::invalid_request(
+                "param key must be trimmed and control-free",
+            ));
+        }
+        if !is_ref_param_placeholder_key(key) {
+            return Err(FetchDeny::invalid_request(format!(
+                "param key {key:?} is invalid"
+            )));
+        }
+        if is_sensitive_ref_param_key(key) {
+            return Err(FetchDeny::invalid_request(format!(
+                "param key {key:?} is reserved"
+            )));
+        }
+        if value.is_empty() || value.len() > MAX_REF_PARAM_VALUE_BYTES {
+            return Err(FetchDeny::invalid_request(format!(
+                "param value length must be between 1 and {MAX_REF_PARAM_VALUE_BYTES} bytes"
+            )));
+        }
+        if value.trim() != value || string_contains_control(value) {
+            return Err(FetchDeny::invalid_request(
+                "param value must be trimmed and control-free",
+            ));
+        }
+        if value.contains("://")
+            || value.chars().any(|c| {
+                matches!(
+                    c,
+                    '/' | '\\' | '?' | '#' | '@' | '%' | '&' | '=' | ';' | ':'
+                )
+            })
+        {
+            return Err(FetchDeny::invalid_request(
+                "param value contains reserved URL syntax",
+            ));
+        }
+        let lower = value.to_lowercase();
+        if lower.starts_with("bearer ")
+            || lower.starts_with("basic ")
+            || lower.contains("authorization:")
+            || lower.contains("cookie:")
+        {
+            return Err(FetchDeny::invalid_request(
+                "param value contains credential-looking syntax",
+            ));
         }
     }
     Ok(())
@@ -423,7 +628,7 @@ fn request_uses_extended_fetch(
 fn validate_extended_fetch_shape(
     req: &HostHTTPFetchRequest,
 ) -> Result<ValidatedFetchShape, FetchDeny> {
-    if let Some(id) = req.auth_profile_ref.as_deref() {
+    if let Some(id) = opt_nonempty(&req.auth_profile_ref) {
         validate_auth_profile_ref(id)?;
     }
     let method = normalize_fetch_method(req.method.as_deref().unwrap_or(""))?;
@@ -442,7 +647,7 @@ fn validate_extended_fetch_shape(
     }
     let wants_extended =
         request_uses_extended_fetch(&method, req.headers.as_ref(), !body.is_empty());
-    if wants_extended && req.auth_profile_ref.is_some() {
+    if wants_extended && opt_nonempty(&req.auth_profile_ref).is_some() {
         return Err(FetchDeny::invalid_request(
             "extended fetch request must not use an auth profile",
         ));
@@ -587,6 +792,20 @@ fn determine_request_mode(
         ) {
             return Err(FetchDeny::invalid_request(e.to_string()));
         }
+        if let Some(params) = req.params.as_ref().filter(|p| !p.is_empty()) {
+            validate_ref_params(params)?;
+        }
+        // The declared broker policy refs are the closest local analog of the
+        // host-side policy resolution: unknown refs are denied, not malformed.
+        let declared = manifest.broker_policy_refs.as_deref().unwrap_or(&[]);
+        if !declared
+            .iter()
+            .any(|r| r == req.broker_policy_ref.as_deref().unwrap_or_default())
+        {
+            return Err(FetchDeny::policy_denied(
+                "host policy endpoint is not available",
+            ));
+        }
         return Ok(RequestMode::Ref);
     }
 
@@ -634,6 +853,57 @@ fn classify_response(
         Ok(next) => HopAction::Follow(next),
         Err(_) => HopAction::Deny,
     }
+}
+
+/// Shared egress gate for the initial request and every redirect hop, in both
+/// mock and live dispatch: HTTP(S)-only, no userinfo (including the empty
+/// `http://@host/` form), a present domain host (no IP literals, trailing
+/// dots, or escapes), the manifest domain allowlist, plus HTTPS whenever the
+/// hop is extended or carries injected credentials. All failures collapse to
+/// a broker-layer fetch denial.
+fn check_hop_target(
+    raw_url: &str,
+    manifest: &Manifest,
+    wants_extended: bool,
+    has_auth: bool,
+) -> Result<Url, FetchDeny> {
+    let deny = || FetchDeny::fetch_failed("request target is not allowed by manifest policy");
+    let parsed = Url::parse(raw_url).map_err(|_| deny())?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(deny());
+    }
+    // Reject userinfo and escaped-authority forms the parser normalizes away
+    // (e.g. `http://@host/`, `https://%65xample.com/`).
+    let authority = raw_url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .unwrap_or_default();
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || authority.contains('@')
+        || authority.contains('%')
+    {
+        return Err(deny());
+    }
+    let host = parsed.host_str().unwrap_or_default();
+    if host.is_empty() || host.ends_with('.') {
+        return Err(deny());
+    }
+    if matches!(parsed.host(), Some(Host::Ipv4(_)) | Some(Host::Ipv6(_))) {
+        return Err(deny());
+    }
+    match manifest.allows_url(raw_url) {
+        Ok(true) => {}
+        _ => return Err(deny()),
+    }
+    if wants_extended && scheme != "https" {
+        return Err(deny());
+    }
+    if has_auth && scheme != "https" {
+        return Err(deny());
+    }
+    Ok(parsed)
 }
 
 /// Effective per-fetch timeout: smallest positive of request, manifest, and
@@ -778,6 +1048,8 @@ fn is_restricted_ipv6(ip: Ipv6Addr) -> bool {
         || (segments[0] == 0x0100 && segments[1..4].iter().all(|segment| *segment == 0))
         // IETF protocol assignments (2001::/23)
         || (segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0)
+        // Benchmarking (2001:2::/48)
+        || (segments[0] == 0x2001 && segments[1] == 0x0002)
         // Documentation (2001:db8::/32)
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         // 6to4 (2002::/16)
@@ -935,17 +1207,39 @@ impl MockBroker {
         req: &HostHTTPFetchRequest,
         shape: &ValidatedFetchShape,
     ) -> Option<HostHTTPFetchResponse> {
+        let known_secrets = collect_known_secrets(shape, None);
         for rule in &self.rules {
             if rule.matches_request(req, shape) {
-                let body_b64 = base64::engine::general_purpose::STANDARD.encode(&rule.body);
+                // Only the safe response-header allowlist reaches the guest,
+                // under canonical names, with secrets redacted — same egress
+                // contract as a live response.
+                let mut headers = BTreeMap::new();
+                for (name, values) in &rule.headers {
+                    let lower = name.trim().to_lowercase();
+                    if !SAFE_RESPONSE_HEADERS.contains(&lower.as_str())
+                        || is_secret_header_name(&lower)
+                    {
+                        continue;
+                    }
+                    let redacted: Vec<String> = values
+                        .iter()
+                        .map(|value| redact_sensitive(value, &known_secrets))
+                        .collect();
+                    headers.insert(canonical_header_name(&lower), redacted);
+                }
+                let final_url = req
+                    .url
+                    .as_deref()
+                    .map(|url| redact_sensitive(url, &known_secrets));
                 // The wire contract reports ok:true for any delivered status;
                 // ref-mode hits carry no final_url.
                 return Some(HostHTTPFetchResponse {
                     ok: true,
                     status_code: Some(rule.status_code),
-                    final_url: req.url.clone(),
-                    headers: Some(rule.headers.clone()),
-                    body_base64: Some(body_b64),
+                    final_url,
+                    headers: (!headers.is_empty()).then_some(headers),
+                    body_base64: (!rule.body.is_empty())
+                        .then(|| base64::engine::general_purpose::STANDARD.encode(&rule.body)),
                     error_code: None,
                     message: None,
                 });
@@ -982,6 +1276,10 @@ impl LiveBroker {
     /// Executes the request, enforcing per-hop URL/SSRF/https checks, the
     /// response byte cap, injected auth, and secret-reflection guards.
     /// `manifest` is needed per hop so redirect targets re-run domain policy.
+    ///
+    /// Callers must route requests through `HostBroker::handle_fetch` so the
+    /// capability, shape, header, and mode gates run first; calling this
+    /// directly with a caller-built shape bypasses those checks.
     pub fn fetch(
         &self,
         req: &HostHTTPFetchRequest,
@@ -989,7 +1287,7 @@ impl LiveBroker {
         auth_header: Option<(&str, &str)>,
         manifest: &Manifest,
     ) -> HostHTTPFetchResponse {
-        let deny_code: &'static str = if req.auth_profile_ref.is_some() {
+        let deny_code: &'static str = if opt_nonempty(&req.auth_profile_ref).is_some() {
             "authenticated_fetch_failed"
         } else {
             "fetch_failed"
@@ -1014,31 +1312,18 @@ impl LiveBroker {
         let mut current_url = raw_url.to_string();
         let mut redirects: u32 = 0;
         loop {
-            // Per-hop URL policy and safety checks (mirrors parseSafeHTTPURL
-            // plus the manifest domain gate re-run on every redirect target).
-            let Ok(parsed) = Url::parse(&current_url) else {
-                return broker_failed_response(deny_code);
+            // Per-hop egress gate: scheme/userinfo/host/manifest/https checks
+            // re-run on every redirect target (injected credentials require
+            // HTTPS on the hop they are attached to).
+            let parsed = match check_hop_target(
+                &current_url,
+                manifest,
+                shape.wants_extended,
+                auth_header.is_some(),
+            ) {
+                Ok(parsed) => parsed,
+                Err(_) => return broker_failed_response(deny_code),
             };
-            if !matches!(parsed.scheme(), "http" | "https")
-                || parsed.host_str().is_none()
-                || !parsed.username().is_empty()
-                || parsed.password().is_some()
-            {
-                return broker_failed_response(deny_code);
-            }
-            match manifest.allows_url(&current_url) {
-                Ok(true) => {}
-                _ => return broker_failed_response(deny_code),
-            }
-            if parsed
-                .host_str()
-                .is_some_and(|host| host.parse::<IpAddr>().is_ok_and(is_restricted_ip))
-            {
-                return broker_failed_response(deny_code);
-            }
-            if shape.wants_extended && parsed.scheme() != "https" {
-                return broker_failed_response(deny_code);
-            }
 
             let mut request = self.agent.request(&shape.method, &current_url);
             for (name, value) in &shape.validated_headers {
@@ -1086,6 +1371,13 @@ impl LiveBroker {
     }
 }
 
+/// Content-Encoding is opaque when, after trim+case folding, it is neither
+/// absent/empty nor `identity`; secret-carrying bodies then fail closed.
+fn content_encoding_is_opaque(raw: Option<&str>) -> bool {
+    raw.map(|v| v.trim().to_lowercase())
+        .is_some_and(|enc| !enc.is_empty() && enc != "identity")
+}
+
 /// Shared response materialization for a delivered hop: expose only safe
 /// non-secret response headers, stream the body under the byte cap, report
 /// `ok:true` for any status, and fail closed when a tracked secret would be
@@ -1097,7 +1389,7 @@ fn process_response(
     deny_code: &'static str,
 ) -> HostHTTPFetchResponse {
     let status = response.status() as i32;
-    let final_url = response.get_url().to_string();
+    let final_url = redact_sensitive(&response.get_url().to_string(), known_secrets);
 
     let mut resp_headers = BTreeMap::new();
     for safe_header in SAFE_RESPONSE_HEADERS {
@@ -1105,7 +1397,10 @@ fn process_response(
             continue;
         }
         if let Some(val) = response.header(safe_header) {
-            resp_headers.insert(safe_header.to_string(), vec![val.to_string()]);
+            resp_headers.insert(
+                canonical_header_name(safe_header),
+                vec![redact_sensitive(val, known_secrets)],
+            );
         }
     }
 
@@ -1114,9 +1409,7 @@ fn process_response(
         .map(String::as_str)
         .filter(|s| s.len() >= MIN_SECRET_REFLECTION_BYTES)
         .collect();
-    let content_encoding = response
-        .header("content-encoding")
-        .map(|v| v.trim().to_lowercase());
+    let opaque_encoding = content_encoding_is_opaque(response.header("content-encoding"));
 
     let mut reader = response.into_reader();
     let mut body_bytes = Vec::new();
@@ -1126,15 +1419,10 @@ fn process_response(
             Ok(0) => break,
             Ok(n) => {
                 if body_bytes.len() + n > max_bytes {
-                    return HostHTTPFetchResponse {
-                        ok: false,
-                        status_code: Some(status),
-                        final_url: Some(final_url),
-                        headers: Some(resp_headers),
-                        error_code: Some("response_too_large".to_string()),
-                        message: Some(format!("response body exceeds {} bytes limit", max_bytes)),
-                        ..Default::default()
-                    };
+                    // A capped body is a broker fetch failure; the
+                    // response_too_large category is reserved for the
+                    // encoded host-import response exceeding its wire cap.
+                    return broker_failed_response(deny_code);
                 }
                 body_bytes.extend_from_slice(&chunk[..n]);
             }
@@ -1144,11 +1432,7 @@ fn process_response(
 
     if !tracked.is_empty() {
         // Opaque encodings hide secret echoes inside bytes we cannot inspect.
-        if !body_bytes.is_empty()
-            && content_encoding
-                .as_deref()
-                .is_some_and(|enc| !enc.is_empty() && enc != "identity")
-        {
+        if !body_bytes.is_empty() && opaque_encoding {
             return broker_failed_response(deny_code);
         }
         if contains_secret_reflection(&body_bytes, &resp_headers, &tracked) {
@@ -1160,8 +1444,9 @@ fn process_response(
         ok: true,
         status_code: Some(status),
         final_url: Some(final_url),
-        headers: Some(resp_headers),
-        body_base64: Some(base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
+        headers: (!resp_headers.is_empty()).then_some(resp_headers),
+        body_base64: (!body_bytes.is_empty())
+            .then(|| base64::engine::general_purpose::STANDARD.encode(&body_bytes)),
         error_code: None,
         message: None,
     }
@@ -1229,8 +1514,16 @@ impl HostBroker {
             );
         }
 
+        // 8. Auth profile requests fail inside the broker when the capability
+        //    is absent, classifying as an authenticated fetch failure.
+        if opt_nonempty(&req.auth_profile_ref).is_some()
+            && !manifest.has_capability(CAPABILITY_AUTH_PROFILE)
+        {
+            return broker_failed_response("authenticated_fetch_failed");
+        }
+
         // Broker-layer failures classify as authenticated when a profile is set
-        let deny_code: &'static str = if req.auth_profile_ref.is_some() {
+        let deny_code: &'static str = if opt_nonempty(&req.auth_profile_ref).is_some() {
             "authenticated_fetch_failed"
         } else {
             "fetch_failed"
@@ -1248,23 +1541,24 @@ impl HostBroker {
             Err(_) => return broker_failed_response(deny_code),
         }
 
-        // 10. Mode-specific pre-dispatch gates
+        // 10. Mode-specific pre-dispatch gates. Raw mode validates the
+        // request target with the same hop-level egress rules the live path
+        // applies per redirect (scheme, userinfo, host shape, IP literals,
+        // manifest domains, and HTTPS for extended/auth hops).
         match mode {
             RequestMode::Raw => {
                 let url = req.url.as_deref().unwrap_or_default();
-                match manifest.allows_url(url) {
-                    Ok(true) => {}
-                    _ => return broker_failed_response(deny_code),
+                let has_auth = opt_nonempty(&req.auth_profile_ref).is_some();
+                if check_hop_target(url, manifest, shape.wants_extended, has_auth).is_err() {
+                    return broker_failed_response(deny_code);
                 }
             }
             RequestMode::Ref => {}
         }
 
-        // 11. Auth profile resolution (only basic fetch can reach this point)
-        let secret_holder = if let Some(profile_ref) = &req.auth_profile_ref {
-            if !manifest.has_capability(CAPABILITY_AUTH_PROFILE) {
-                return policy_denied_response("pack does not have capability 'cap.auth.profile'");
-            }
+        // 11. Auth profile resolution (only basic fetch can reach this point;
+        //     the capability gate already ran above).
+        let secret_holder = if let Some(profile_ref) = opt_nonempty(&req.auth_profile_ref) {
             match auth_provider.get_secret(profile_ref) {
                 Some(secret) => Some(secret),
                 None => return broker_failed_response("authenticated_fetch_failed"),
@@ -1305,12 +1599,13 @@ impl HostBroker {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_header_name, classify_response, contains_secret_reflection, decode_extended_body,
-        effective_max_response_bytes, effective_timeout, is_denied_extended_name,
-        is_extended_body_content_type_allowed, is_http_token, is_valid_pack_owned_authorization,
-        normalize_fetch_method, validate_auth_profile_ref, validate_extended_fetch_shape,
-        validate_pack_headers, HopAction, LiveBroker, PublicOnlyResolver, ValidatedFetchShape,
-        SSRF_BLOCKED_MARKER,
+        canonical_header_name, check_hop_target, classify_response, contains_secret_reflection,
+        content_encoding_is_opaque, decode_extended_body, effective_max_response_bytes,
+        effective_timeout, is_denied_extended_name, is_extended_body_content_type_allowed,
+        is_http_token, is_valid_pack_owned_authorization, is_valid_profile_slug,
+        normalize_fetch_method, redact_sensitive, validate_auth_profile_ref,
+        validate_extended_fetch_shape, validate_pack_headers, validate_ref_params, HopAction,
+        LiveBroker, PublicOnlyResolver, ValidatedFetchShape, SSRF_BLOCKED_MARKER,
     };
     use crate::manifest::{DomainRule, Manifest, ResourceLimits};
     use base64::Engine;
@@ -1661,5 +1956,164 @@ mod tests {
         let mut headers = BTreeMap::new();
         headers.insert("etag".to_string(), vec!["has-livesecret".to_string()]);
         assert!(contains_secret_reflection(b"", &headers, &["livesecret"]));
+    }
+
+    #[test]
+    fn hop_target_enforces_scheme_userinfo_host_and_https() {
+        let manifest = manifest_with_domains(&["example.com"]);
+
+        // Unsafe schemes, userinfo, and host shapes are all denied.
+        for url in [
+            "ftp://example.com/x",
+            "javascript:alert(1)",
+            "data:text/plain,x",
+            "https://user@example.com/",
+            "https://user:pw@example.com/",
+            "https://@example.com/",
+            "https://example.com./",
+            "https://%65xample.com/",
+        ] {
+            assert!(
+                check_hop_target(url, &manifest, false, false).is_err(),
+                "{url} should be denied"
+            );
+        }
+
+        // IP literals are always denied, including IPv6 bracket forms.
+        for url in [
+            "https://127.0.0.1/",
+            "https://[::1]/",
+            "https://[::ffff:8.8.8.8]/",
+        ] {
+            assert!(
+                check_hop_target(url, &manifest, false, false).is_err(),
+                "{url} should be denied"
+            );
+        }
+
+        // Plain HTTPS on an allowed domain passes; off-domain fails.
+        assert!(check_hop_target("https://example.com/x", &manifest, false, false).is_ok());
+        assert!(check_hop_target("https://other.com/x", &manifest, false, false).is_err());
+
+        // Extended and auth-bearing hops require HTTPS.
+        assert!(check_hop_target("http://example.com/x", &manifest, false, false).is_ok());
+        assert!(check_hop_target("http://example.com/x", &manifest, true, false).is_err());
+        assert!(check_hop_target("http://example.com/x", &manifest, false, true).is_err());
+        assert!(check_hop_target("https://example.com/x", &manifest, true, true).is_ok());
+    }
+
+    #[test]
+    fn redact_sensitive_covers_known_secrets_query_keys_and_header_spans() {
+        let secrets = vec!["s3cr3t-value".to_string()];
+        assert_eq!(
+            redact_sensitive("prefix-s3cr3t-value-suffix", &secrets),
+            "prefix-[REDACTED]-suffix"
+        );
+        // Short secrets still redact (the >=8B floor applies to reflection,
+        // not egress redaction).
+        let secrets = vec!["ab".to_string()];
+        assert_eq!(redact_sensitive("xabx", &secrets), "x[REDACTED]x");
+
+        // Token-like query keys redact without any known secret.
+        assert_eq!(
+            redact_sensitive("https://h/?token=abc&x=1", &[]),
+            "https://h/?token=[REDACTED]&x=1"
+        );
+        assert_eq!(
+            redact_sensitive("https://h/?next=/a&api_key=k1", &[]),
+            "https://h/?next=/a&api_key=[REDACTED]"
+        );
+
+        // Embedded credential-shaped spans redact through the line end.
+        assert_eq!(
+            redact_sensitive("h: Authorization: Bearer xyz\nnext", &[]),
+            "h: Authorization: [REDACTED]\nnext"
+        );
+        assert_eq!(
+            redact_sensitive("X-Api-Key=v1, tail", &[]),
+            "X-Api-Key= [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn content_encoding_opacity_normalizes_case_and_whitespace() {
+        for enc in ["gzip", " GZIP ", "Br", "deflate"] {
+            assert!(content_encoding_is_opaque(Some(enc)), "{enc} is opaque");
+        }
+        for enc in ["identity", " Identity ", "IDENTITY", "", "  "] {
+            assert!(
+                !content_encoding_is_opaque(Some(enc)),
+                "{enc} is not opaque"
+            );
+        }
+        assert!(!content_encoding_is_opaque(None));
+    }
+
+    #[test]
+    fn ref_params_enforce_shape_sensitive_keys_and_value_rules() {
+        let valid = BTreeMap::from([
+            ("store".to_string(), "main".to_string()),
+            ("page-no".to_string(), "42".to_string()),
+        ]);
+        assert!(validate_ref_params(&valid).is_ok());
+        // Single-char keys are legal.
+        assert!(validate_ref_params(&BTreeMap::from([("k".to_string(), "v".to_string())])).is_ok());
+
+        // Too many entries.
+        let many: BTreeMap<String, String> = (0..17)
+            .map(|i| (format!("k{i:02}"), "v".to_string()))
+            .collect();
+        assert!(validate_ref_params(&many).is_err());
+
+        // Sensitive and malformed keys.
+        for key in [
+            "token",
+            "api-key",
+            "my-secret",
+            "auth-id",
+            "Bad_Key",
+            "-lead",
+            "trail-",
+            " space",
+        ] {
+            let params = BTreeMap::from([(key.to_string(), "v".to_string())]);
+            assert!(validate_ref_params(&params).is_err(), "{key} must fail");
+        }
+
+        // Reserved URL / credential syntax in values.
+        for value in [
+            "https://x",
+            "a/b",
+            "a?b",
+            "a@b",
+            "a%b",
+            "a=b",
+            "a;b",
+            "a:b",
+            "Bearer tok",
+            "x authorization:y",
+            " cookie:v",
+        ] {
+            let params = BTreeMap::from([("k".to_string(), value.to_string())]);
+            assert!(validate_ref_params(&params).is_err(), "{value} must fail");
+        }
+
+        // Empty and oversized values fail.
+        assert!(validate_ref_params(&BTreeMap::from([("k".to_string(), String::new())])).is_err());
+        assert!(
+            validate_ref_params(&BTreeMap::from([("k".to_string(), "v".repeat(513))])).is_err()
+        );
+        // Boundary value of exactly 512 bytes passes.
+        assert!(validate_ref_params(&BTreeMap::from([("k".to_string(), "v".repeat(512))])).is_ok());
+    }
+
+    #[test]
+    fn profile_slug_predicate_matches_validator() {
+        for good in ["a", "ab", "a-b", "prof-1"] {
+            assert!(is_valid_profile_slug(good), "{good} should pass");
+        }
+        for bad in ["", "A", "-a", "a-", "a_b", "a.b"] {
+            assert!(!is_valid_profile_slug(bad), "{bad} should fail");
+        }
     }
 }

@@ -424,7 +424,8 @@ fn b10_auth_profile_ref_outcomes() {
     );
     assert_code(&resp, "invalid_request", "B10 bad slug");
 
-    // Valid slug, missing cap.auth.profile
+    // Valid slug, missing cap.auth.profile: the capability gate lives inside
+    // the broker's auth path, so the failure is authenticated_fetch_failed.
     let req = HostHTTPFetchRequest {
         auth_profile_ref: Some("my-prof".to_string()),
         ..request()
@@ -435,7 +436,7 @@ fn b10_auth_profile_ref_outcomes() {
         req,
         &auth,
     );
-    assert_code(&resp, "policy_denied", "B10 missing auth cap");
+    assert_code(&resp, "authenticated_fetch_failed", "B10 missing auth cap");
 
     // Valid slug, capability present, profile unregistered
     let req = HostHTTPFetchRequest {
@@ -993,4 +994,242 @@ fn ref_mode_mock_matching_and_validated_shape_export() {
     broker.add_rule(simple_hit_rule());
     let req = request();
     assert!(broker.resolve(&req, &shape).is_some());
+}
+
+// ---------- Boundary and egress-safety regression layer ----------
+
+#[test]
+fn boundary_body_headers_and_value_caps_are_inclusive() {
+    // Exactly 16 KiB decoded body passes the cap.
+    let body_16kib = base64::engine::general_purpose::STANDARD.encode(vec![7u8; 16 * 1024]);
+    let req = HostHTTPFetchRequest {
+        method: Some("POST".to_string()),
+        headers: headers(&[("Content-Type", "application/json")]),
+        body_base64: Some(body_16kib),
+        ..request()
+    };
+    let resp = run(
+        &mock_with(simple_hit_rule()),
+        &extended_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "16 KiB body: {:?}", resp.message);
+
+    // Exactly 16 request headers pass the count cap.
+    let many: Vec<(String, String)> = (0..16)
+        .map(|i| (format!("x-h{i:02}"), "v".to_string()))
+        .collect();
+    let req = HostHTTPFetchRequest {
+        headers: Some(many.into_iter().collect()),
+        ..request()
+    };
+    let resp = run(
+        &mock_with(simple_hit_rule()),
+        &extended_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "16 headers: {:?}", resp.message);
+
+    // Exactly 1024-byte header value passes.
+    let long = "v".repeat(1024);
+    let req = HostHTTPFetchRequest {
+        headers: headers(&[("x-big", long.as_str())]),
+        ..request()
+    };
+    let resp = run(
+        &mock_with(simple_hit_rule()),
+        &extended_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "1024-byte value: {:?}", resp.message);
+}
+
+#[test]
+fn unsafe_targets_fail_at_the_shared_egress_gate() {
+    // These are rejected before any transport in mock mode as well: scheme,
+    // userinfo (including the empty `//` form), IP literals, trailing dots.
+    for url in [
+        "ftp://share.fixture.invalid/x",
+        "javascript:alert(1)",
+        "data:text/plain,x",
+        "https://user@share.fixture.invalid/",
+        "https://user:pw@share.fixture.invalid/",
+        "https://@share.fixture.invalid/",
+        "https://share.fixture.invalid./",
+        "https://127.0.0.1/",
+        "https://[::1]/",
+    ] {
+        let req = HostHTTPFetchRequest {
+            url: Some(url.to_string()),
+            ..Default::default()
+        };
+        let resp = run(
+            &mock_with(simple_hit_rule()),
+            &basic_manifest(),
+            req,
+            &AuthProvider::new(),
+        );
+        assert_code(&resp, "fetch_failed", url);
+    }
+}
+
+#[test]
+fn auth_profile_over_http_is_denied_before_transport() {
+    let mut auth = AuthProvider::new();
+    auth.add_profile(
+        "my-prof",
+        true,
+        goaria_extractor_sdk::types::AuthSecretKind::Bearer,
+        "eyJ...",
+        Some("topsecret-token".to_string()),
+    );
+    let m = manifest(
+        &["cap.http.fetch", "cap.auth.profile"],
+        &["share.fixture.invalid"],
+    );
+    let req = HostHTTPFetchRequest {
+        url: Some("http://share.fixture.invalid/x".to_string()),
+        auth_profile_ref: Some("my-prof".to_string()),
+        ..Default::default()
+    };
+    let resp = run(&mock_with(simple_hit_rule()), &m, req, &auth);
+    assert_code(&resp, "authenticated_fetch_failed", "auth over http");
+}
+
+#[test]
+fn empty_auth_profile_ref_is_treated_as_unset() {
+    let req = HostHTTPFetchRequest {
+        auth_profile_ref: Some(String::new()),
+        ..request()
+    };
+    let resp = run(
+        &mock_with(simple_hit_rule()),
+        &basic_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "empty auth_profile_ref: {:?}", resp.message);
+}
+
+#[test]
+fn ref_mode_params_and_membership_are_enforced() {
+    let auth = AuthProvider::new();
+    let alias = alias_manifest(&["cap.http.fetch"]);
+
+    // Sensitive key, reserved URL syntax, and credential-looking values are
+    // all invalid_request at mode determination.
+    for params in [
+        BTreeMap::from([("token".to_string(), "v".to_string())]),
+        BTreeMap::from([("k".to_string(), "https://x".to_string())]),
+        BTreeMap::from([("k".to_string(), "Bearer abc".to_string())]),
+    ] {
+        let req = HostHTTPFetchRequest {
+            broker_policy_ref: Some("bpr-matrix".to_string()),
+            endpoint_ref: Some("ep-matrix".to_string()),
+            params: Some(params),
+            ..Default::default()
+        };
+        let resp = run(&HostBroker::Mock(MockBroker::new()), &alias, req, &auth);
+        assert_code(&resp, "invalid_request", "ref params");
+    }
+
+    // More than 16 params entries.
+    let many: BTreeMap<String, String> = (0..17)
+        .map(|i| (format!("k{i:02}"), "v".to_string()))
+        .collect();
+    let req = HostHTTPFetchRequest {
+        broker_policy_ref: Some("bpr-matrix".to_string()),
+        endpoint_ref: Some("ep-matrix".to_string()),
+        params: Some(many),
+        ..Default::default()
+    };
+    let resp = run(&HostBroker::Mock(MockBroker::new()), &alias, req, &auth);
+    assert_code(&resp, "invalid_request", "ref params >16");
+
+    // A syntactically valid but undeclared broker_policy_ref is policy_denied.
+    let req = HostHTTPFetchRequest {
+        broker_policy_ref: Some("bpr-unknown".to_string()),
+        endpoint_ref: Some("ep-matrix".to_string()),
+        ..Default::default()
+    };
+    let resp = run(&HostBroker::Mock(MockBroker::new()), &alias, req, &auth);
+    assert_code(&resp, "policy_denied", "unknown broker_policy_ref");
+}
+
+#[test]
+fn mock_response_egress_matches_live_contract() {
+    // Fixture headers outside the safe allowlist never reach the guest, and
+    // safe names surface under canonical Title-Case keys.
+    let mut fixture_headers = BTreeMap::new();
+    fixture_headers.insert("content-type".to_string(), vec!["text/plain".to_string()]);
+    fixture_headers.insert("x-internal".to_string(), vec!["nope".to_string()]);
+    fixture_headers.insert("set-cookie".to_string(), vec!["sid=1".to_string()]);
+    let rule = MockBrokerRule {
+        headers: fixture_headers,
+        ..simple_hit_rule()
+    };
+    let resp = run(
+        &mock_with(rule),
+        &basic_manifest(),
+        request(),
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok);
+    let exposed = resp.headers.expect("safe headers must be exposed");
+    assert_eq!(exposed.len(), 1);
+    assert_eq!(
+        exposed.get("Content-Type").map(|v| v.as_slice()),
+        Some(&["text/plain".to_string()][..])
+    );
+
+    // Redirect-class fixture statuses still report ok:true.
+    let rule = MockBrokerRule {
+        status_code: 302,
+        ..simple_hit_rule()
+    };
+    let resp = run(
+        &mock_with(rule),
+        &basic_manifest(),
+        request(),
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "mock 3xx must report ok:true");
+    assert_eq!(resp.status_code, Some(302));
+
+    // Secrets embedded in safe header values and the final URL are redacted.
+    let mut fixture_headers = BTreeMap::new();
+    fixture_headers.insert(
+        "etag".to_string(),
+        vec!["has-supersecretvalue-inside".to_string()],
+    );
+    let rule = MockBrokerRule {
+        headers: fixture_headers,
+        ..simple_hit_rule()
+    };
+    let req = HostHTTPFetchRequest {
+        url: Some(format!("{TEST_URL}?token=supersecretvalue")),
+        headers: headers(&[("X-User", "supersecretvalue")]),
+        ..Default::default()
+    };
+    let mut rule = rule;
+    rule.pattern = UrlPattern::Prefix(TEST_URL.to_string());
+    let resp = run(
+        &mock_with(rule),
+        &extended_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(resp.ok, "redaction case: {:?}", resp.message);
+    let exposed = resp.headers.unwrap();
+    assert_eq!(
+        exposed.get("Etag").map(|v| v.as_slice()),
+        Some(&["has-[REDACTED]-inside".to_string()][..])
+    );
+    assert_eq!(
+        resp.final_url.as_deref(),
+        Some(format!("{TEST_URL}?token=[REDACTED]").as_str())
+    );
 }

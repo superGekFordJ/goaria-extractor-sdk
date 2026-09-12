@@ -5,6 +5,7 @@ use goaria_extractor_sdk::types::{
 };
 
 use crate::manifest::Manifest;
+use crate::runner::host_broker::{is_valid_profile_slug, validate_ref_params};
 use crate::runner::limits::HostCallBudget;
 
 /// Configuration for a simulated auth profile.
@@ -72,43 +73,105 @@ impl AuthProvider {
             };
         }
 
-        // 2. Validate capability
-        if !manifest.has_capability("cap.auth.profile") {
+        // 2. Profile ref must be a well-formed slug before any policy work.
+        if !is_valid_profile_slug(&req.auth_profile_ref) {
             return HostAuthProfileStatusResponse {
                 ok: false,
-                error_code: Some("permission_denied".to_string()),
-                message: Some("pack does not have capability 'cap.auth.profile'".to_string()),
+                error_code: Some("invalid_request".to_string()),
+                message: Some(
+                    "auth_profile_ref must be a lowercase slug of 1-64 characters".to_string(),
+                ),
                 ..Default::default()
             };
         }
 
-        // 3. Validate domain if URL is present
-        if let Some(url) = &req.url {
-            match manifest.allows_url(url) {
+        // 3. Mode determination: url never mixes with ref fields, refs come
+        //    as a pair, and params are validated like the fetch import.
+        let has_url = req.url.as_deref().is_some_and(|u| !u.is_empty());
+        let has_broker_ref = req
+            .broker_policy_ref
+            .as_deref()
+            .is_some_and(|r| !r.is_empty());
+        let has_endpoint_ref = req.endpoint_ref.as_deref().is_some_and(|r| !r.is_empty());
+        if has_url && (has_broker_ref || has_endpoint_ref) {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some("raw url must not be combined with ref-mode fields".to_string()),
+                ..Default::default()
+            };
+        }
+        if has_broker_ref != has_endpoint_ref {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some(
+                    "broker_policy_ref and endpoint_ref must be provided together".to_string(),
+                ),
+                ..Default::default()
+            };
+        }
+        if let Some(params) = req.params.as_ref().filter(|p| !p.is_empty()) {
+            if let Err(deny) = validate_ref_params(params) {
+                return HostAuthProfileStatusResponse {
+                    ok: false,
+                    error_code: Some(deny.error_code.to_string()),
+                    message: Some(deny.message),
+                    ..Default::default()
+                };
+            }
+        }
+        if !has_url && !has_broker_ref {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some(
+                    "request must provide either url or broker_policy_ref with endpoint_ref"
+                        .to_string(),
+                ),
+                ..Default::default()
+            };
+        }
+
+        // 4. Capability + policy gates classify as policy_denied.
+        if !manifest.has_capability("cap.auth.profile") {
+            return HostAuthProfileStatusResponse {
+                ok: false,
+                error_code: Some("policy_denied".to_string()),
+                message: Some("pack does not have capability 'cap.auth.profile'".to_string()),
+                ..Default::default()
+            };
+        }
+        if has_broker_ref {
+            let declared = manifest.broker_policy_refs.as_deref().unwrap_or(&[]);
+            if !declared
+                .iter()
+                .any(|r| r == req.broker_policy_ref.as_deref().unwrap_or_default())
+            {
+                return HostAuthProfileStatusResponse {
+                    ok: false,
+                    error_code: Some("policy_denied".to_string()),
+                    message: Some("host policy endpoint is not available".to_string()),
+                    ..Default::default()
+                };
+            }
+        }
+        if has_url {
+            match manifest.allows_url(req.url.as_deref().unwrap_or_default()) {
                 Ok(true) => {}
-                Ok(false) => {
+                _ => {
                     return HostAuthProfileStatusResponse {
                         ok: false,
-                        error_code: Some("domain_not_allowed".to_string()),
-                        message: Some(format!(
-                            "URL '{}' not allowed by manifest domain rules",
-                            url
-                        )),
-                        ..Default::default()
-                    };
-                }
-                Err(e) => {
-                    return HostAuthProfileStatusResponse {
-                        ok: false,
-                        error_code: Some("invalid_url".to_string()),
-                        message: Some(e.to_string()),
+                        error_code: Some("policy_denied".to_string()),
+                        message: Some("request url is not allowed by manifest policy".to_string()),
                         ..Default::default()
                     };
                 }
             }
         }
 
-        // 4. Query profile registry
+        // 5. Query profile registry; a miss is an unavailable profile, not a
+        //    successful "not found" status.
         match self.profiles.get(&req.auth_profile_ref) {
             Some(profile) => HostAuthProfileStatusResponse {
                 ok: true,
@@ -119,12 +182,12 @@ impl AuthProvider {
                 message: None,
             },
             None => HostAuthProfileStatusResponse {
-                ok: true,
+                ok: false,
                 available: Some(false),
                 kind: None,
                 redacted_display: None,
-                error_code: None,
-                message: Some(format!("auth profile '{}' not found", req.auth_profile_ref)),
+                error_code: Some("auth_unavailable".to_string()),
+                message: Some("auth profile unavailable".to_string()),
             },
         }
     }

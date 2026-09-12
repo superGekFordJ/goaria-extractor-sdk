@@ -45,13 +45,43 @@ fn decode_status_request(
     })
 }
 
+/// Compact payload returned when a serialized host-import response exceeds
+/// the wire cap; mirrors the host's response-size truncation contract.
+fn fetch_response_too_large_bytes() -> Vec<u8> {
+    serde_json::to_vec(&HostHTTPFetchResponse {
+        ok: false,
+        error_code: Some("response_too_large".to_string()),
+        message: Some("host import response exceeds size cap".to_string()),
+        ..Default::default()
+    })
+    .unwrap_or_default()
+}
+
+fn status_response_too_large_bytes() -> Vec<u8> {
+    serde_json::to_vec(&HostAuthProfileStatusResponse {
+        ok: false,
+        error_code: Some("response_too_large".to_string()),
+        message: Some("host import response exceeds size cap".to_string()),
+        ..Default::default()
+    })
+    .unwrap_or_default()
+}
+
 /// Serialize the response, allocate guest memory via `goaria_alloc`, copy the
-/// bytes in, and return the packed ptr/len handle; 0 on any failure.
+/// bytes in, and return the packed ptr/len handle. An oversized response is
+/// replaced by the compact `response_too_large` payload; 0 only remains for
+/// failures where no response can be delivered at all.
 fn write_guest_response(
     caller: &mut Caller<'_, HostState>,
     memory: &Memory,
     resp_bytes: Vec<u8>,
+    too_large_bytes: &[u8],
 ) -> i64 {
+    let resp_bytes = if resp_bytes.len() > MAX_HOST_IMPORT_RESPONSE_BYTES {
+        too_large_bytes.to_vec()
+    } else {
+        resp_bytes
+    };
     if resp_bytes.is_empty() || resp_bytes.len() > MAX_HOST_IMPORT_RESPONSE_BYTES {
         return 0;
     }
@@ -150,11 +180,27 @@ impl WasmEngine {
                     return 0;
                 }
 
+                let too_large = fetch_response_too_large_bytes();
                 let req: HostHTTPFetchRequest = match decode_fetch_request(&req_bytes) {
                     Ok(r) => r,
                     Err(resp) => {
+                        // A malformed payload still burns one host call before
+                        // the invalid_request response.
+                        let mut budget = caller.data().budget.clone();
+                        let resp = match budget.consume() {
+                            Ok(()) => {
+                                caller.data_mut().budget = budget;
+                                resp
+                            }
+                            Err(e) => HostHTTPFetchResponse {
+                                ok: false,
+                                error_code: Some("budget_exhausted".to_string()),
+                                message: Some(e.to_string()),
+                                ..Default::default()
+                            },
+                        };
                         let bytes = serde_json::to_vec(&resp).unwrap_or_default();
-                        return write_guest_response(&mut caller, &memory, bytes);
+                        return write_guest_response(&mut caller, &memory, bytes, &too_large);
                     }
                 };
 
@@ -171,7 +217,7 @@ impl WasmEngine {
                     Err(_) => return 0,
                 };
 
-                write_guest_response(&mut caller, &memory, resp_bytes)
+                write_guest_response(&mut caller, &memory, resp_bytes, &too_large)
             },
         )?;
 
@@ -198,11 +244,27 @@ impl WasmEngine {
                     return 0;
                 }
 
+                let too_large = status_response_too_large_bytes();
                 let req: HostAuthProfileStatusRequest = match decode_status_request(&req_bytes) {
                     Ok(r) => r,
                     Err(resp) => {
+                        // Same budget burn as the fetch import for malformed
+                        // payloads.
+                        let mut budget = caller.data().budget.clone();
+                        let resp = match budget.consume() {
+                            Ok(()) => {
+                                caller.data_mut().budget = budget;
+                                resp
+                            }
+                            Err(e) => HostAuthProfileStatusResponse {
+                                ok: false,
+                                error_code: Some("budget_exhausted".to_string()),
+                                message: Some(e.to_string()),
+                                ..Default::default()
+                            },
+                        };
                         let bytes = serde_json::to_vec(&resp).unwrap_or_default();
-                        return write_guest_response(&mut caller, &memory, bytes);
+                        return write_guest_response(&mut caller, &memory, bytes, &too_large);
                     }
                 };
 
@@ -218,7 +280,7 @@ impl WasmEngine {
                     Err(_) => return 0,
                 };
 
-                write_guest_response(&mut caller, &memory, resp_bytes)
+                write_guest_response(&mut caller, &memory, resp_bytes, &too_large)
             },
         )?;
 
@@ -239,7 +301,29 @@ impl WasmEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{approximate_instruction_budget, decode_fetch_request, decode_status_request};
+    use super::{
+        approximate_instruction_budget, decode_fetch_request, decode_status_request,
+        fetch_response_too_large_bytes, status_response_too_large_bytes,
+    };
+    use crate::runner::limits::MAX_HOST_IMPORT_RESPONSE_BYTES;
+    use goaria_extractor_sdk::types::{HostAuthProfileStatusResponse, HostHTTPFetchResponse};
+
+    #[test]
+    fn oversized_response_fallback_is_compact_and_parseable() {
+        let bytes = fetch_response_too_large_bytes();
+        assert!(bytes.len() < MAX_HOST_IMPORT_RESPONSE_BYTES);
+        let resp: HostHTTPFetchResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("response_too_large"));
+        assert_eq!(resp.status_code, None);
+        assert_eq!(resp.final_url, None);
+        assert_eq!(resp.headers, None);
+
+        let bytes = status_response_too_large_bytes();
+        let resp: HostAuthProfileStatusResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("response_too_large"));
+    }
 
     #[test]
     fn decode_failures_produce_invalid_request_responses() {
