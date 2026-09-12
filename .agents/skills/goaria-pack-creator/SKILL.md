@@ -327,8 +327,10 @@ impl Extractor for CustomExtractor {
 
     fn extract(&self, input: ExtractInput) -> Result<ExtractOutput, ExtractorError> {
         let broker = HostBroker::new();
+        // Params are placeholder substitutions for the endpoint template —
+        // slug-shaped keys and values without URL/credential syntax.
         let mut params = BTreeMap::new();
-        params.insert("url".to_string(), input.url);
+        params.insert("item".to_string(), "item-123".to_string());
 
         // Ref-only invocation: never combine refs with `url`/`method`.
         let resp = match broker.fetch_ref("bpr-custom01", "ep-custom01", params) {

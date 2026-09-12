@@ -254,7 +254,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
   "status_code": 200,
   "final_url": "https://api.fixture.invalid/v1/metadata?id=123",
   "headers": {
-    "content-type": ["application/json"]
+    "Content-Type": ["application/json"]
   },
   "body_base64": "eyJzdGF0dXMiOiJzdWNjZXNzIn0=",
   "error_code": "",
@@ -263,10 +263,10 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 ```
 - `ok` (`bool`, required): Whether the HTTP call succeeded and was permitted by policy.
 - `status_code` (`int`, optional): HTTP status code (e.g. `200`, `404`).
-- `final_url` (`string`, optional): URL after redirects.
-- `headers` (`map[string][]string`, optional): Response headers.
+- `final_url` (`string`, optional): URL after redirects. Secret-shaped values are redacted before exposure.
+- `headers` (`map[string][]string`, optional): Response headers, restricted to the safe allowlist (`Content-Length`, `Content-Type`, `Etag`, `Last-Modified`) under canonical `Title-Case` names, with secret-shaped values redacted.
 - `body_base64` (`string`, optional): Base64-encoded response payload bytes.
-- `error_code` (`string`, optional): Error identifier if `ok` is `false`.
+- `error_code` (`string`, optional): Error identifier if `ok` is `false`. Host categories: `invalid_request` (malformed request shape), `policy_denied` (capability/policy gate), `fetch_failed` / `authenticated_fetch_failed` (broker-layer failures; static messages), `budget_exhausted` (host-call budget), `response_too_large` (the serialized host-import response exceeded its wire cap — the payload carries only `ok`/`error_code`/`message`). The local CLI additionally emits `no_mock_match`, `broker_disabled`, and `ref_mode_not_supported_in_live_runner`.
 - `message` (`string`, optional): Error message if `ok` is `false`.
 
 ### 5.4 `HostAuthProfileStatusRequest` & `HostAuthProfileStatusResponse`
