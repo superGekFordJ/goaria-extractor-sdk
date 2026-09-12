@@ -1,9 +1,9 @@
 use crate::manifest::{
-    validate_opaque_policy_ref, Manifest, CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH,
-    CAPABILITY_HTTP_FETCH_EXTENDED,
+    schema::MAX_RESPONSE_BYTES, validate_opaque_policy_ref, Manifest, CAPABILITY_AUTH_PROFILE,
+    CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
 };
 use crate::runner::auth_provider::AuthProvider;
-use crate::runner::limits::{HostCallBudget, MAX_HOST_IMPORT_RESPONSE_BYTES};
+use crate::runner::limits::HostCallBudget;
 use base64::Engine;
 use goaria_extractor_sdk::types::{HostHTTPFetchRequest, HostHTTPFetchResponse};
 use regex::Regex;
@@ -95,7 +95,6 @@ const DENIED_EXTENDED_HEADER_PREFIXES: &[&str] = &[
 const MAX_EXTENDED_FETCH_BODY_BYTES: usize = 16 * 1024;
 const MAX_HEADER_COUNT: usize = 16;
 const MAX_HEADER_VALUE_BYTES: usize = 1024;
-const MIN_SECRET_REFLECTION_BYTES: usize = 8;
 const REDIRECT_LIMIT: u32 = 5;
 const MAX_FETCH_TIMEOUT_MILLIS: u64 = 10_000;
 const DEFAULT_FETCH_TIMEOUT_MILLIS: u64 = 5_000;
@@ -361,7 +360,7 @@ fn is_forbidden_pack_header(lower: &str) -> bool {
 }
 
 /// Any character < 0x20 or DEL (0x7f); tab is rejected here on purpose.
-fn string_contains_control(value: &str) -> bool {
+pub(crate) fn string_contains_control(value: &str) -> bool {
     value.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}')
 }
 
@@ -929,49 +928,24 @@ fn effective_timeout(req: &HostHTTPFetchRequest, manifest: &Manifest) -> Duratio
 }
 
 /// Effective response body cap: smallest positive of request, manifest, and
-/// the runner wire cap.
+/// the 10MiB policy maximum. Bodies beyond the wire cap surface as
+/// `response_too_large` at encode time, not a transport failure.
 fn effective_max_response_bytes(req: &HostHTTPFetchRequest, manifest: &Manifest) -> usize {
     [
         req.max_response_bytes.filter(|v| *v > 0),
         (manifest.resource_limits.max_response_bytes > 0)
             .then_some(manifest.resource_limits.max_response_bytes),
-        Some(MAX_HOST_IMPORT_RESPONSE_BYTES as i64),
+        Some(MAX_RESPONSE_BYTES),
     ]
     .into_iter()
     .flatten()
     .min()
-    .unwrap_or(MAX_HOST_IMPORT_RESPONSE_BYTES as i64) as usize
+    .unwrap_or(MAX_RESPONSE_BYTES) as usize
 }
 
 /// Values that must never be reflected back to the guest: pack-owned
 /// privileged header values (plus Authorization credentials segment) and
 /// host-injected auth secrets (plus their name=value form).
-/// Literal byte-level secret replacement for response bodies; works on
-/// arbitrary binary content without UTF-8 loss.
-fn redact_body_bytes(body: &[u8], secrets: &[String]) -> Vec<u8> {
-    let mut out = body.to_vec();
-    for secret in secrets {
-        let needle = secret.as_bytes();
-        if needle.is_empty() || needle.len() > out.len() {
-            continue;
-        }
-        let mut replaced = Vec::with_capacity(out.len());
-        let mut i = 0;
-        while i + needle.len() <= out.len() {
-            if out[i..i + needle.len()] == *needle {
-                replaced.extend_from_slice(REDACTED_MARKER.as_bytes());
-                i += needle.len();
-            } else {
-                replaced.push(out[i]);
-                i += 1;
-            }
-        }
-        replaced.extend_from_slice(&out[i..]);
-        out = replaced;
-    }
-    out
-}
-
 fn collect_known_secrets(
     shape: &ValidatedFetchShape,
     auth_header: Option<(&str, &str)>,
@@ -1239,13 +1213,21 @@ impl MockBroker {
         req: &HostHTTPFetchRequest,
         shape: &ValidatedFetchShape,
         auth_header: Option<(&str, &str)>,
+        manifest: &Manifest,
     ) -> Option<HostHTTPFetchResponse> {
         let known_secrets = collect_known_secrets(shape, auth_header);
+        let tracked: Vec<&str> = known_secrets.iter().map(String::as_str).collect();
         for rule in &self.rules {
             if rule.matches_request(req, shape) {
+                // The fixture body obeys the same transport cap a live
+                // response would hit.
+                if rule.body.len() > effective_max_response_bytes(req, manifest) {
+                    return Some(broker_failed_response("fetch_failed"));
+                }
                 // Only the safe response-header allowlist reaches the guest,
                 // under canonical names, with secrets redacted — same egress
-                // contract as a live response.
+                // contract as a live response. Raw values feed the
+                // reflection gate below.
                 let mut headers = BTreeMap::new();
                 for (name, values) in &rule.headers {
                     let lower = name.trim().to_lowercase();
@@ -1254,11 +1236,17 @@ impl MockBroker {
                     {
                         continue;
                     }
-                    let redacted: Vec<String> = values
-                        .iter()
-                        .map(|value| redact_sensitive(value, &known_secrets))
-                        .collect();
-                    headers.insert(canonical_header_name(&lower), redacted);
+                    headers.insert(canonical_header_name(&lower), values.clone());
+                }
+                // A fixture echoing a tracked secret is denied whole, like a
+                // live response tripping the reflection gate.
+                if contains_secret_reflection(&rule.body, &headers, &tracked) {
+                    return Some(broker_failed_response("fetch_failed"));
+                }
+                for values in headers.values_mut() {
+                    for value in values.iter_mut() {
+                        *value = redact_sensitive(value, &known_secrets);
+                    }
                 }
                 let final_url = req
                     .url
@@ -1271,10 +1259,8 @@ impl MockBroker {
                     status_code: Some(rule.status_code),
                     final_url,
                     headers: (!headers.is_empty()).then_some(headers),
-                    body_base64: (!rule.body.is_empty()).then(|| {
-                        let redacted_body = redact_body_bytes(&rule.body, &known_secrets);
-                        base64::engine::general_purpose::STANDARD.encode(redacted_body)
-                    }),
+                    body_base64: (!rule.body.is_empty())
+                        .then(|| base64::engine::general_purpose::STANDARD.encode(&rule.body)),
                     error_code: None,
                     message: None,
                 });
@@ -1361,6 +1347,9 @@ impl LiveBroker {
             };
 
             let mut request = self.agent.request(&shape.method, &current_url);
+            // Host-controlled: ask for identity so bodies stay inspectable;
+            // a non-identity response is denied after read regardless.
+            request = request.set("Accept-Encoding", "identity");
             for (name, value) in &shape.validated_headers {
                 request = request.set(&canonical_header_name(name), value);
             }
@@ -1399,7 +1388,13 @@ impl LiveBroker {
                     current_url = next.to_string();
                 }
                 HopAction::Deliver => {
-                    return process_response(response, max_bytes, &known_secrets, deny_code);
+                    return process_response(
+                        response,
+                        &current_url,
+                        max_bytes,
+                        &known_secrets,
+                        deny_code,
+                    );
                 }
             }
         }
@@ -1419,31 +1414,28 @@ fn content_encoding_is_opaque(raw: Option<&str>) -> bool {
 /// reflected back to the guest.
 fn process_response(
     response: ureq::Response,
+    hop_url: &str,
     max_bytes: usize,
     known_secrets: &[String],
     deny_code: &'static str,
 ) -> HostHTTPFetchResponse {
     let status = response.status() as i32;
-    let final_url = redact_sensitive(&response.get_url().to_string(), known_secrets);
+    // Report the URL spelling we requested, not the transport's normalized form.
+    let final_url = redact_sensitive(hop_url, known_secrets);
 
+    // Raw values first: the reflection gate must see what the server
+    // actually echoed, not the already-redacted egress form.
     let mut resp_headers = BTreeMap::new();
     for safe_header in SAFE_RESPONSE_HEADERS {
         if is_secret_header_name(safe_header) {
             continue;
         }
         if let Some(val) = response.header(safe_header) {
-            resp_headers.insert(
-                canonical_header_name(safe_header),
-                vec![redact_sensitive(val, known_secrets)],
-            );
+            resp_headers.insert(canonical_header_name(safe_header), vec![val.to_string()]);
         }
     }
 
-    let tracked: Vec<&str> = known_secrets
-        .iter()
-        .map(String::as_str)
-        .filter(|s| s.len() >= MIN_SECRET_REFLECTION_BYTES)
-        .collect();
+    let tracked: Vec<&str> = known_secrets.iter().map(String::as_str).collect();
     let opaque_encoding = content_encoding_is_opaque(response.header("content-encoding"));
 
     let mut reader = response.into_reader();
@@ -1465,13 +1457,17 @@ fn process_response(
         }
     }
 
-    if !tracked.is_empty() {
-        // Opaque encodings hide secret echoes inside bytes we cannot inspect.
-        if !body_bytes.is_empty() && opaque_encoding {
-            return broker_failed_response(deny_code);
-        }
-        if contains_secret_reflection(&body_bytes, &resp_headers, &tracked) {
-            return broker_failed_response(deny_code);
+    // The runner cannot decode opaque encodings; delivering compressed
+    // bytes to the guest is worse than a clean denial.
+    if !body_bytes.is_empty() && opaque_encoding {
+        return broker_failed_response(deny_code);
+    }
+    if !tracked.is_empty() && contains_secret_reflection(&body_bytes, &resp_headers, &tracked) {
+        return broker_failed_response(deny_code);
+    }
+    for values in resp_headers.values_mut() {
+        for value in values.iter_mut() {
+            *value = redact_sensitive(value, known_secrets);
         }
     }
 
@@ -1592,21 +1588,24 @@ impl HostBroker {
         }
 
         // 11. Auth profile resolution (only basic fetch can reach this point;
-        //     the capability gate already ran above).
-        let secret_holder = if let Some(profile_ref) = opt_nonempty(&req.auth_profile_ref) {
-            match auth_provider.get_secret(profile_ref) {
-                Some(secret) => Some(secret),
+        //     the capability gate already ran above). The resolved pair is
+        //     reused on every hop — the local provider has no per-URL scope.
+        let auth_holder = if let Some(profile_ref) = opt_nonempty(&req.auth_profile_ref) {
+            match auth_provider.get_auth_header(profile_ref) {
+                Some(header) => Some(header),
                 None => return broker_failed_response("authenticated_fetch_failed"),
             }
         } else {
             None
         };
-        let auth_header = secret_holder.as_deref().map(|s| ("Authorization", s));
+        let auth_header = auth_holder
+            .as_ref()
+            .map(|(name, value)| (name.as_str(), value.as_str()));
 
         // 12. Dispatch
         match self {
             Self::Mock(mock) => {
-                if let Some(resp) = mock.resolve(&req, &shape, auth_header) {
+                if let Some(resp) = mock.resolve(&req, &shape, auth_header, manifest) {
                     resp
                 } else {
                     HostHTTPFetchResponse {
@@ -1719,44 +1718,59 @@ mod tests {
     }
 
     #[test]
-    fn mock_resolve_redacts_injected_auth_secret() {
+    fn mock_resolve_redacts_egress_and_denies_secret_echo() {
         let mut broker = MockBroker::new();
         let mut headers = BTreeMap::new();
-        headers.insert("etag".to_string(), vec!["v-tok123".to_string()]);
+        headers.insert("etag".to_string(), vec!["plain-etag".to_string()]);
         broker.add_rule(MockBrokerRule {
-            pattern: UrlPattern::Exact("https://example.com/".to_string()),
+            pattern: UrlPattern::Exact("https://example.com/?sig=tok123456".to_string()),
             status_code: 200,
             headers,
-            body: b"body-tok123".to_vec(),
+            body: b"plain body".to_vec(),
             expect: None,
         });
         let req = HostHTTPFetchRequest {
-            url: Some("https://example.com/".to_string()),
+            url: Some("https://example.com/?sig=tok123456".to_string()),
             ..Default::default()
         };
         let shape = ValidatedFetchShape {
             method: "GET".to_string(),
             ..Default::default()
         };
+        let manifest = manifest_with_domains(&["example.com"]);
+        let auth = Some(("Authorization", "tok123456"));
 
-        let redacted = broker
-            .resolve(&req, &shape, Some(("Authorization", "tok123")))
-            .unwrap();
+        // Egress fields redact the credential; non-echoing fixtures deliver.
+        let resp = broker.resolve(&req, &shape, auth, &manifest).unwrap();
+        assert!(resp.ok, "unexpected deny: {:?}", resp);
         assert_eq!(
-            redacted.headers.as_ref().unwrap()["Etag"],
-            vec!["v-[REDACTED]".to_string()]
+            resp.headers.as_ref().unwrap()["Etag"],
+            vec!["plain-etag".to_string()]
         );
-        let body = base64::engine::general_purpose::STANDARD
-            .decode(redacted.body_base64.unwrap())
-            .unwrap();
-        assert_eq!(body, b"body-[REDACTED]");
+        assert_eq!(
+            resp.final_url.as_deref(),
+            Some("https://example.com/?sig=[REDACTED]")
+        );
 
-        // Without the resolved credential the same fixture leaks through.
-        let plain = broker.resolve(&req, &shape, None).unwrap();
-        assert_eq!(
-            plain.headers.as_ref().unwrap()["Etag"],
-            vec!["v-tok123".to_string()]
-        );
+        // A fixture echoing a tracked secret is denied whole.
+        let mut echo = MockBroker::new();
+        echo.add_rule(MockBrokerRule {
+            pattern: UrlPattern::Exact("https://example.com/?sig=tok123456".to_string()),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body: b"echo tok123456 back".to_vec(),
+            expect: None,
+        });
+        let denied = echo.resolve(&req, &shape, auth, &manifest).unwrap();
+        assert!(!denied.ok);
+        assert_eq!(denied.error_code.as_deref(), Some("fetch_failed"));
+
+        // Fixture bodies beyond the effective cap deny like a live read.
+        let mut capped = manifest_with_domains(&["example.com"]);
+        capped.resource_limits.max_response_bytes = 4;
+        let over = broker.resolve(&req, &shape, None, &capped).unwrap();
+        assert!(!over.ok);
+        assert_eq!(over.error_code.as_deref(), Some("fetch_failed"));
     }
 
     #[test]

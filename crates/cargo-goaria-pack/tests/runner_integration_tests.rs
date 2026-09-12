@@ -378,6 +378,8 @@ fn test_mock_broker_matching() {
         method: "GET".to_string(),
         ..Default::default()
     };
+    let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
+    let manifest: Manifest = serde_json::from_str(manifest_str).unwrap();
 
     let req_exact = HostHTTPFetchRequest {
         url: Some("https://share.fixture.invalid/api/item/42".to_string()),
@@ -385,7 +387,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp = broker
-        .resolve(&req_exact, &get_shape, None)
+        .resolve(&req_exact, &get_shape, None, &manifest)
         .expect("should resolve exact match");
     assert!(resp.ok);
     assert_eq!(resp.status_code, Some(200));
@@ -396,7 +398,7 @@ fn test_mock_broker_matching() {
         ..Default::default()
     };
     let resp_prefix = broker
-        .resolve(&req_prefix, &get_shape, None)
+        .resolve(&req_prefix, &get_shape, None, &manifest)
         .expect("should resolve prefix match");
     assert!(resp_prefix.ok);
 
@@ -404,7 +406,9 @@ fn test_mock_broker_matching() {
         url: Some("https://share.fixture.invalid/not-found".to_string()),
         ..Default::default()
     };
-    assert!(broker.resolve(&req_unmatched, &get_shape, None).is_none());
+    assert!(broker
+        .resolve(&req_unmatched, &get_shape, None, &manifest)
+        .is_none());
 }
 
 #[test]

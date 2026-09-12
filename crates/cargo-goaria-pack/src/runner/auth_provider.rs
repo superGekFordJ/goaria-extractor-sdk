@@ -6,7 +6,8 @@ use goaria_extractor_sdk::types::{
 
 use crate::manifest::Manifest;
 use crate::runner::host_broker::{
-    check_hop_target, is_alias_manifest, is_valid_profile_slug, validate_ref_params,
+    check_hop_target, is_alias_manifest, is_valid_profile_slug, string_contains_control,
+    validate_ref_params,
 };
 use crate::runner::limits::HostCallBudget;
 
@@ -59,6 +60,23 @@ impl AuthProvider {
         self.profiles.get(id).and_then(|p| p.raw_secret.clone())
     }
 
+    /// Resolves a profile into the header name/value pair injected on fetch
+    /// hops. Bearer profiles map to `Authorization`, Cookie to `Cookie`;
+    /// unknown kinds and control-byte-tainted secrets resolve unavailable.
+    pub fn get_auth_header(&self, id: &str) -> Option<(String, String)> {
+        let profile = self.profiles.get(id)?;
+        let secret = profile.raw_secret.clone()?;
+        let name = match profile.kind {
+            AuthSecretKind::Bearer => "Authorization",
+            AuthSecretKind::Cookie => "Cookie",
+            AuthSecretKind::Unknown => return None,
+        };
+        if secret.is_empty() || string_contains_control(&secret) {
+            return None;
+        }
+        Some((name.to_string(), secret))
+    }
+
     pub fn handle_status(
         &self,
         manifest: &Manifest,
@@ -95,7 +113,8 @@ impl AuthProvider {
             .as_deref()
             .is_some_and(|r| !r.is_empty());
         let has_endpoint_ref = req.endpoint_ref.as_deref().is_some_and(|r| !r.is_empty());
-        if has_url && (has_broker_ref || has_endpoint_ref) {
+        let has_params = req.params.as_ref().is_some_and(|p| !p.is_empty());
+        if has_url && (has_broker_ref || has_endpoint_ref || has_params) {
             return HostAuthProfileStatusResponse {
                 ok: false,
                 error_code: Some("invalid_request".to_string()),

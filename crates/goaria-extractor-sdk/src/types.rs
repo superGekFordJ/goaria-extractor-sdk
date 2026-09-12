@@ -145,8 +145,9 @@ pub struct HostHTTPFetchRequest {
 }
 
 /// Response payload received from host import goaria_host.http_fetch.
+/// Unknown fields are tolerated so newer hosts stay decodable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HostHTTPFetchResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -179,8 +180,9 @@ pub struct HostAuthProfileStatusRequest {
 }
 
 /// Response payload received from host import goaria_host.auth_profile_status.
+/// Unknown fields are tolerated so newer hosts stay decodable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct HostAuthProfileStatusResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

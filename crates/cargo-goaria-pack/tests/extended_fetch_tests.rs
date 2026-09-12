@@ -993,7 +993,9 @@ fn ref_mode_mock_matching_and_validated_shape_export() {
     let mut broker = MockBroker::new();
     broker.add_rule(simple_hit_rule());
     let req = request();
-    assert!(broker.resolve(&req, &shape, None).is_some());
+    assert!(broker
+        .resolve(&req, &shape, None, &manifest(&["cap.http.fetch"], &[]))
+        .is_some());
 }
 
 // ---------- Boundary and egress-safety regression layer ----------
@@ -1199,23 +1201,19 @@ fn mock_response_egress_matches_live_contract() {
     assert!(resp.ok, "mock 3xx must report ok:true");
     assert_eq!(resp.status_code, Some(302));
 
-    // Secrets embedded in safe header values and the final URL are redacted.
+    // Secrets in the final URL are redacted; non-echoing fixtures deliver.
     let mut fixture_headers = BTreeMap::new();
-    fixture_headers.insert(
-        "etag".to_string(),
-        vec!["has-supersecretvalue-inside".to_string()],
-    );
-    let rule = MockBrokerRule {
+    fixture_headers.insert("etag".to_string(), vec!["plain-etag".to_string()]);
+    let mut rule = MockBrokerRule {
         headers: fixture_headers,
         ..simple_hit_rule()
     };
+    rule.pattern = UrlPattern::Prefix(TEST_URL.to_string());
     let req = HostHTTPFetchRequest {
         url: Some(format!("{TEST_URL}?token=supersecretvalue")),
         headers: headers(&[("X-User", "supersecretvalue")]),
         ..Default::default()
     };
-    let mut rule = rule;
-    rule.pattern = UrlPattern::Prefix(TEST_URL.to_string());
     let resp = run(
         &mock_with(rule),
         &extended_manifest(),
@@ -1223,13 +1221,53 @@ fn mock_response_egress_matches_live_contract() {
         &AuthProvider::new(),
     );
     assert!(resp.ok, "redaction case: {:?}", resp.message);
-    let exposed = resp.headers.unwrap();
     assert_eq!(
-        exposed.get("Etag").map(|v| v.as_slice()),
-        Some(&["has-[REDACTED]-inside".to_string()][..])
+        resp.headers
+            .as_ref()
+            .and_then(|h| h.get("Etag"))
+            .map(|v| v.as_slice()),
+        Some(&["plain-etag".to_string()][..])
     );
     assert_eq!(
         resp.final_url.as_deref(),
         Some(format!("{TEST_URL}?token=[REDACTED]").as_str())
     );
+
+    // A fixture echoing a tracked secret is denied whole, like a live
+    // response tripping the host reflection gate.
+    let mut fixture_headers = BTreeMap::new();
+    fixture_headers.insert(
+        "etag".to_string(),
+        vec!["has-supersecretvalue-inside".to_string()],
+    );
+    let mut rule = MockBrokerRule {
+        headers: fixture_headers,
+        ..simple_hit_rule()
+    };
+    rule.pattern = UrlPattern::Prefix(TEST_URL.to_string());
+    let req = HostHTTPFetchRequest {
+        url: Some(format!("{TEST_URL}?token=supersecretvalue")),
+        headers: headers(&[("X-User", "supersecretvalue")]),
+        ..Default::default()
+    };
+    let resp = run(
+        &mock_with(rule),
+        &extended_manifest(),
+        req.clone(),
+        &AuthProvider::new(),
+    );
+    assert!(!resp.ok);
+    assert_eq!(resp.error_code.as_deref(), Some("fetch_failed"));
+
+    let mut rule = simple_hit_rule();
+    rule.body = b"leaks supersecretvalue back".to_vec();
+    rule.pattern = UrlPattern::Prefix(TEST_URL.to_string());
+    let resp = run(
+        &mock_with(rule),
+        &extended_manifest(),
+        req,
+        &AuthProvider::new(),
+    );
+    assert!(!resp.ok);
+    assert_eq!(resp.error_code.as_deref(), Some("fetch_failed"));
 }
