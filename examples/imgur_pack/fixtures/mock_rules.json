@@ -1,0 +1,7 @@
+[
+  {
+    "prefix": "https://imgur.com/",
+    "status": 200,
+    "body": "<html><head><meta property=\"og:image\" content=\"https://i.imgur.com/sample123.jpg\" /></head><body>sanitized</body></html>"
+  }
+]

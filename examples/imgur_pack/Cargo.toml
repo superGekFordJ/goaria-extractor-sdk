@@ -1,0 +1,13 @@
+[package]
+name = "imgur_pack"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+goaria-extractor-sdk = { path = "../../crates/goaria-extractor-sdk" }
+serde = { workspace = true }
+serde_json = { workspace = true }
