@@ -246,7 +246,7 @@ Mock fixtures consumed by `test`/`run` are JSON objects (or arrays of objects) w
 - exactly one URL pattern: `url`, `exact`, `prefix`, or `pattern` (`prefix` matches by string prefix; the other three match exactly);
 - optional `status_code`/`status` (integer 100–599, default `200`);
 - optional `headers` (`name: string | string[]`), `json`, `body_base64`, or `body` shaping the mock response. Only the safe response-header allowlist is exposed to the guest;
-- optional `expect` asserting the outgoing request: `method` (case-insensitive), `headers` (canonical-insensitive name → exact value), `body_base64` (decoded byte equality), `broker_policy_ref`/`endpoint_ref` (exact ref match for ref-mode requests). Every declared field must match or the rule is skipped.
+- optional `expect` asserting the outgoing request: `method` (case-insensitive), `headers` (canonical-insensitive name → exact value), `body_base64` (decoded byte equality), `broker_policy_ref`/`endpoint_ref` (exact ref match for ref-mode requests). Every declared field must match or the rule is skipped. Ref-mode requests carry no URL, so a rule matching them still needs a placeholder pattern field (any value); matching then decides on `expect` alone.
 
 ### 5.2 Host-Visible Buffer Ownership Check
 The CLI verifies balanced ownership for ABI buffers visible to the host, including host-created input buffers and guest-returned output buffers. It cannot observe arbitrary allocations inside the guest allocator, so this check is not whole-guest leak detection and does not claim an exact leaked-byte count.
