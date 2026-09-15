@@ -332,7 +332,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 }
 ```
 - `kind` (`string`, required): Registration kind. Only `"bearer"` is defined; any other value is rejected as `invalid_request`.
-- `token` (`string`, required): Raw bearer token, 1–8192 bytes, valid UTF-8, no CR/LF, and MUST NOT already carry a `Bearer ` scheme prefix (case-insensitive). The token is host-only after this call: it never appears in responses, ABI output, logs, or persisted state other than the materialized `Authorization: Bearer <token>` download header.
+- `token` (`string`, required): Raw bearer token, 1–8170 bytes, valid UTF-8, no CR/LF, and MUST NOT already carry a `Bearer ` scheme prefix (case-insensitive). The cap reserves the 22-byte `Authorization: Bearer ` prefix inside the 8192-byte download header-line limit so a registered token can always materialize. The token is host-only after this call: it never appears in responses, ABI output, logs, or persisted state other than the materialized `Authorization: Bearer <token>` download header.
 
 #### `HostRegisterDownloadAuthResponse`
 ```json
@@ -407,6 +407,7 @@ The host maintains a bounded, in-memory registry of pack-registered credentials:
 - **Output binding**: An item carrying `download_auth_ref` must reference a ref minted during the same invocation by the same pack, and the ref binds to the item's download host. Forged, cross-pack, cross-host, expired, or raw-token values fail extraction.
 - **Materialization**: At task submission the host resolves the ref to its token and emits exactly `Authorization: Bearer <token>` as an ordinary download header. The opaque ref is never persisted; the materialized header may persist as normal task state. Explicit `Authorization`/`Cookie` headers supplied alongside `download_auth_ref` are rejected.
 - **Invalidation**: Runtime snapshot load/reload/remove transitions invalidate the registry; secrets are zeroed on every purge path.
+- **Local CLI scope**: The local `cargo-goaria-pack` runner does not resolve or evaluate alias host policy (`domain_policy_refs` / `broker_policy_refs`), so a CLI run is not a substitute for host-side enforcement. The production host applies the resolved policy when binding refs to emitted item hosts and again at materialization.
 
 ---
 
