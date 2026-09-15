@@ -1,8 +1,11 @@
 use crate::error::ExtractorError;
-use crate::host::{raw_auth_profile_status, raw_http_fetch};
+use crate::host::{
+    raw_auth_profile_status, raw_host_time, raw_http_fetch, raw_register_download_auth,
+};
 use crate::types::{
     HostAuthProfileStatusRequest, HostAuthProfileStatusResponse, HostHTTPFetchRequest,
-    HostHTTPFetchResponse,
+    HostHTTPFetchResponse, HostRegisterDownloadAuthRequest, HostRegisterDownloadAuthResponse,
+    HostTimeRequest, HostTimeResponse,
 };
 use base64::Engine;
 use std::collections::BTreeMap;
@@ -215,5 +218,57 @@ impl HostBroker {
         url: impl Into<String>,
     ) -> Result<bool, ExtractorError> {
         self.is_auth_available_for_url(auth_profile_ref, url)
+    }
+
+    /// Register a pack-minted bearer token with the host and receive the
+    /// opaque `download_auth_ref` to bind onto emitted items. Requires the
+    /// manifest to declare `cap.download.auth`; the token itself never
+    /// crosses the ABI boundary again.
+    pub fn register_download_auth(
+        &self,
+        token: impl Into<String>,
+    ) -> Result<String, ExtractorError> {
+        let req_json = serde_json::to_vec(&HostRegisterDownloadAuthRequest {
+            kind: "bearer".to_string(),
+            token: token.into(),
+        })?;
+        let buf = raw_register_download_auth(&req_json)?;
+        let resp: HostRegisterDownloadAuthResponse = serde_json::from_slice(buf.as_slice())?;
+        if !resp.ok {
+            return Err(ExtractorError::HostError {
+                error_code: resp
+                    .error_code
+                    .unwrap_or_else(|| "unknown_error".to_string()),
+                message: resp
+                    .message
+                    .unwrap_or_else(|| "register download auth failed".to_string()),
+            });
+        }
+        resp.download_auth_ref.ok_or_else(|| ExtractorError::HostError {
+            error_code: "invalid_response".to_string(),
+            message: "register_download_auth response missing download_auth_ref".to_string(),
+        })
+    }
+
+    /// Read the host's invocation-scoped Unix timestamp. Consumes one
+    /// host-call budget unit; requires no capability.
+    pub fn host_time(&self) -> Result<i64, ExtractorError> {
+        let req_json = serde_json::to_vec(&HostTimeRequest {})?;
+        let buf = raw_host_time(&req_json)?;
+        let resp: HostTimeResponse = serde_json::from_slice(buf.as_slice())?;
+        if !resp.ok {
+            return Err(ExtractorError::HostError {
+                error_code: resp
+                    .error_code
+                    .unwrap_or_else(|| "unknown_error".to_string()),
+                message: resp
+                    .message
+                    .unwrap_or_else(|| "host_time failed".to_string()),
+            });
+        }
+        resp.unix_secs.ok_or_else(|| ExtractorError::HostError {
+            error_code: "invalid_response".to_string(),
+            message: "host_time response missing unix_secs".to_string(),
+        })
     }
 }

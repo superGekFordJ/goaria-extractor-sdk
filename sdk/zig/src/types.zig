@@ -9,6 +9,9 @@ pub const CAPABILITY_HTTP_FETCH = "cap.http.fetch";
 pub const CAPABILITY_HTTP_FETCH_EXTENDED = "cap.http.fetch.extended";
 /// Manifest capability: use host-custody auth profiles.
 pub const CAPABILITY_AUTH_PROFILE = "cap.auth.profile";
+/// Manifest capability: register a self-minted bearer credential for the
+/// materialized download Authorization header.
+pub const CAPABILITY_DOWNLOAD_AUTH = "cap.download.auth";
 
 /// Key-value string map (e.g. metadata, params, request headers).
 pub const StringMap = std.json.ArrayHashMap([]const u8);
@@ -70,6 +73,9 @@ pub const ExtractedItemRef = struct {
     mime_type: ?[]const u8 = null,
     auth_profile_ref: ?[]const u8 = null,
     header_profile_ref: ?[]const u8 = null,
+    /// Opaque host-registered download-auth reference (`dar-` + 32 lowercase
+    /// hex). Mutually exclusive with auth_profile_ref / header_profile_ref.
+    download_auth_ref: ?[]const u8 = null,
     metadata: ?StringMap = null,
 };
 
@@ -106,6 +112,10 @@ pub const HostHTTPFetchRequest = struct {
     auth_profile_ref: ?[]const u8 = null,
     timeout_millis: ?i32 = null,
     max_response_bytes: ?i64 = null,
+    /// Opt this self-authenticated fetch out of browser grant/cookie
+    /// matching and typed browser fields. Must not combine with
+    /// auth_profile_ref.
+    omit_browser_context: ?bool = null,
 };
 
 /// Response payload received from host import `goaria_host.http_fetch`.
@@ -134,6 +144,34 @@ pub const HostAuthProfileStatusResponse = struct {
     available: ?bool = null,
     kind: ?AuthSecretKind = null,
     redacted_display: ?[]const u8 = null,
+    error_code: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+};
+
+/// Request payload sent to host import `goaria_host.register_download_auth`.
+/// Only `kind = "bearer"` exists; the token never leaves the host except as
+/// the materialized Authorization header.
+pub const HostRegisterDownloadAuthRequest = struct {
+    kind: []const u8,
+    token: []const u8,
+};
+
+/// Response payload received from `goaria_host.register_download_auth`.
+pub const HostRegisterDownloadAuthResponse = struct {
+    ok: bool,
+    download_auth_ref: ?[]const u8 = null,
+    error_code: ?[]const u8 = null,
+    message: ?[]const u8 = null,
+};
+
+/// Request payload sent to host import `goaria_host.host_time`. The wire
+/// shape is intentionally empty: any field is an invalid_request on the host.
+pub const HostTimeRequest = struct {};
+
+/// Response payload received from `goaria_host.host_time`.
+pub const HostTimeResponse = struct {
+    ok: bool,
+    unix_secs: ?i64 = null,
     error_code: ?[]const u8 = null,
     message: ?[]const u8 = null,
 };
@@ -258,4 +296,106 @@ test "HostHTTPFetchResponse parsing" {
     try std.testing.expectEqual(@as(?i32, 200), parsed.value.status_code);
     try std.testing.expectEqualStrings("https://share.fixture.invalid/res", parsed.value.final_url.?);
     try std.testing.expectEqualStrings("aGVsbG8=", parsed.value.body_base64.?);
+}
+
+test "download_auth_ref and omit_browser_context wire contract" {
+    const allocator = std.testing.allocator;
+
+    const item = ExtractedItemRef{
+        .id = "item-1",
+        .download_auth_ref = "dar-0123456789abcdef0123456789abcdef",
+    };
+    const item_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(item, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(item_json);
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        item_json,
+        "\"download_auth_ref\":\"dar-0123456789abcdef0123456789abcdef\"",
+    ) != null);
+
+    const req = HostHTTPFetchRequest{
+        .url = "https://api.fixture.invalid/v1",
+        .omit_browser_context = true,
+    };
+    const req_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(req, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(req_json);
+    try std.testing.expect(std.mem.indexOf(u8, req_json, "\"omit_browser_context\":true") != null);
+
+    // null must not emit the key (omitempty parity)
+    const bare = HostHTTPFetchRequest{ .url = "https://api.fixture.invalid/" };
+    const bare_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(bare, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(bare_json);
+    try std.testing.expect(std.mem.indexOf(u8, bare_json, "omit_browser_context") == null);
+
+    const parsed = try std.json.parseFromSlice(
+        HostHTTPFetchRequest,
+        allocator,
+        req_json,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(?bool, true), parsed.value.omit_browser_context);
+}
+
+test "register_download_auth and host_time DTO wire contract" {
+    const allocator = std.testing.allocator;
+
+    const req = HostRegisterDownloadAuthRequest{
+        .kind = "bearer",
+        .token = "opaque-token-42",
+    };
+    const req_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(req, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(req_json);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"bearer\",\"token\":\"opaque-token-42\"}",
+        req_json,
+    );
+
+    const resp = try std.json.parseFromSlice(
+        HostRegisterDownloadAuthResponse,
+        allocator,
+        "{\"ok\":true,\"download_auth_ref\":\"dar-0123456789abcdef0123456789abcdef\"}",
+        .{ .ignore_unknown_fields = true },
+    );
+    defer resp.deinit();
+    try std.testing.expect(resp.value.ok);
+    try std.testing.expectEqualStrings(
+        "dar-0123456789abcdef0123456789abcdef",
+        resp.value.download_auth_ref.?,
+    );
+
+    // host_time request serializes to exactly {}
+    const time_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(HostTimeRequest{}, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(time_json);
+    try std.testing.expectEqualStrings("{}", time_json);
+
+    const time_resp = try std.json.parseFromSlice(
+        HostTimeResponse,
+        allocator,
+        "{\"ok\":true,\"unix_secs\":1800000000}",
+        .{ .ignore_unknown_fields = true },
+    );
+    defer time_resp.deinit();
+    try std.testing.expect(time_resp.value.ok);
+    try std.testing.expectEqual(@as(?i64, 1800000000), time_resp.value.unix_secs);
 }

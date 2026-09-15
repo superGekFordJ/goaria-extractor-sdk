@@ -33,6 +33,7 @@ impl Extractor for RustFixtureExtractor {
             mime_type: Some("application/octet-stream".to_string()),
             auth_profile_ref: None,
             header_profile_ref: None,
+            download_auth_ref: None,
             metadata: Some(metadata),
         };
 

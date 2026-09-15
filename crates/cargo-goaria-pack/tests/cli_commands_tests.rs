@@ -424,6 +424,79 @@ fn test_wasm_static_analyzer_disallowed_imports() {
 }
 
 #[test]
+fn test_wasm_static_analyzer_download_auth_imports() {
+    use cargo_goaria_pack::manifest::Capability;
+
+    let manifest_str = include_str!("../../../examples/rust_fixture_pack/manifest.json");
+    let mut manifest: Manifest = serde_json::from_str(manifest_str).expect("parse manifest");
+
+    let base_analysis = WasmAnalysis {
+        exports: [
+            "goaria_abi_version",
+            "goaria_alloc",
+            "goaria_free",
+            "goaria_match",
+            "goaria_extract",
+            "memory",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        export_signatures: [
+            ("goaria_abi_version", "() -> i32"),
+            ("goaria_alloc", "(i32) -> i32"),
+            ("goaria_free", "(i32, i32) -> ()"),
+            ("goaria_match", "(i32, i32) -> i64"),
+            ("goaria_extract", "(i32, i32) -> i64"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect(),
+        memory_exported: true,
+        memory_count: 1,
+        ..Default::default()
+    };
+
+    // host_time requires no capability.
+    let mut time_only = base_analysis.clone();
+    time_only.imports.push((
+        "goaria_host".to_string(),
+        "host_time".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(verify_wasm_and_manifest(&time_only, &manifest).is_ok());
+
+    // register_download_auth requires cap.download.auth.
+    let mut missing_cap = base_analysis.clone();
+    missing_cap.imports.push((
+        "goaria_host".to_string(),
+        "register_download_auth".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(matches!(
+        verify_wasm_and_manifest(&missing_cap, &manifest),
+        Err(CheckError::MissingCapabilityForImport { .. })
+    ));
+
+    // With the capability declared, both imports pass.
+    manifest
+        .capabilities
+        .push(Capability("cap.download.auth".to_string()));
+    let mut with_cap = base_analysis;
+    with_cap.imports.push((
+        "goaria_host".to_string(),
+        "register_download_auth".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    with_cap.imports.push((
+        "goaria_host".to_string(),
+        "host_time".to_string(),
+        "(i32, i32) -> i64".to_string(),
+    ));
+    assert!(verify_wasm_and_manifest(&with_cap, &manifest).is_ok());
+}
+
+#[test]
 fn test_pack_pipeline_on_fixture() {
     let fixture_dir = rust_fixture_dir();
 

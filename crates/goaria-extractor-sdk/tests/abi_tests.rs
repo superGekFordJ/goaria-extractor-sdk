@@ -115,6 +115,7 @@ fn test_extracted_item_ref_and_extract_output() {
         mime_type: Some("application/zip".to_string()),
         auth_profile_ref: Some("profile-oauth".to_string()),
         header_profile_ref: None,
+        download_auth_ref: None,
         metadata: Some(metadata),
     };
 
@@ -143,6 +144,7 @@ fn test_host_http_fetch_request_and_response_dto() {
         endpoint_ref: None,
         params: None,
         max_response_bytes: None,
+        omit_browser_context: None,
     };
 
     let req_json = serde_json::to_string(&req).unwrap();
@@ -209,13 +211,14 @@ fn test_fetch_request_rejects_unknown_body_field() {
 #[test]
 fn test_capability_constants() {
     use goaria_extractor_sdk::types::{
-        CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
-        CAPABILITY_PARSE_WASM,
+        CAPABILITY_AUTH_PROFILE, CAPABILITY_DOWNLOAD_AUTH, CAPABILITY_HTTP_FETCH,
+        CAPABILITY_HTTP_FETCH_EXTENDED, CAPABILITY_PARSE_WASM,
     };
     assert_eq!(CAPABILITY_PARSE_WASM, "cap.parse.wasm");
     assert_eq!(CAPABILITY_HTTP_FETCH, "cap.http.fetch");
     assert_eq!(CAPABILITY_HTTP_FETCH_EXTENDED, "cap.http.fetch.extended");
     assert_eq!(CAPABILITY_AUTH_PROFILE, "cap.auth.profile");
+    assert_eq!(CAPABILITY_DOWNLOAD_AUTH, "cap.download.auth");
 }
 
 #[test]
@@ -278,6 +281,83 @@ fn test_host_auth_profile_status_dto() {
     let parsed_resp: HostAuthProfileStatusResponse = serde_json::from_str(&resp_json).unwrap();
     assert!(parsed_resp.ok);
     assert_eq!(parsed_resp.kind, Some(AuthSecretKind::Bearer));
+}
+
+#[test]
+fn test_register_download_auth_dto_wire_contract() {
+    use goaria_extractor_sdk::types::{
+        HostRegisterDownloadAuthRequest, HostRegisterDownloadAuthResponse,
+    };
+
+    let req = HostRegisterDownloadAuthRequest {
+        kind: "bearer".to_string(),
+        token: "opaque-token-42".to_string(),
+    };
+    let req_json = serde_json::to_string(&req).unwrap();
+    assert_eq!(req_json, r#"{"kind":"bearer","token":"opaque-token-42"}"#);
+
+    // request DTO is strict: unknown fields are rejected
+    assert!(serde_json::from_str::<HostRegisterDownloadAuthRequest>(
+        r#"{"kind":"bearer","token":"x","extra":1}"#
+    )
+    .is_err());
+
+    let resp: HostRegisterDownloadAuthResponse = serde_json::from_str(
+        r#"{"ok":true,"download_auth_ref":"dar-0123456789abcdef0123456789abcdef"}"#,
+    )
+    .unwrap();
+    assert!(resp.ok);
+    assert_eq!(
+        resp.download_auth_ref.as_deref(),
+        Some("dar-0123456789abcdef0123456789abcdef")
+    );
+
+    // forward compatibility: newer host fields must stay decodable
+    let resp_fwd: HostRegisterDownloadAuthResponse =
+        serde_json::from_str(r#"{"ok":false,"error_code":"policy_denied","future":1}"#).unwrap();
+    assert!(!resp_fwd.ok);
+    assert_eq!(resp_fwd.error_code.as_deref(), Some("policy_denied"));
+}
+
+#[test]
+fn test_host_time_dto_wire_contract() {
+    use goaria_extractor_sdk::types::{HostTimeRequest, HostTimeResponse};
+
+    // the request wire shape is intentionally an empty object
+    assert_eq!(serde_json::to_string(&HostTimeRequest {}).unwrap(), "{}");
+    assert!(serde_json::from_str::<HostTimeRequest>(r#"{"at":1}"#).is_err());
+
+    let resp: HostTimeResponse =
+        serde_json::from_str(r#"{"ok":true,"unix_secs":1800000000}"#).unwrap();
+    assert!(resp.ok);
+    assert_eq!(resp.unix_secs, Some(1_800_000_000));
+}
+
+#[test]
+fn test_extracted_item_download_auth_ref_and_omit_browser_context() {
+    // download_auth_ref serializes as an opaque string on the item
+    let item = ExtractedItemRef {
+        id: Some("item-1".to_string()),
+        download_auth_ref: Some("dar-0123456789abcdef0123456789abcdef".to_string()),
+        ..Default::default()
+    };
+    let json_str = serde_json::to_string(&item).unwrap();
+    assert!(json_str.contains(
+        r#""download_auth_ref":"dar-0123456789abcdef0123456789abcdef""#
+    ));
+    let roundtrip: ExtractedItemRef = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(roundtrip, item);
+
+    // omit_browser_context is opt-in on the fetch request
+    let req = HostHTTPFetchRequest {
+        url: Some("https://api.fixture.invalid/v1".to_string()),
+        omit_browser_context: Some(true),
+        ..Default::default()
+    };
+    let req_json = serde_json::to_string(&req).unwrap();
+    assert!(req_json.contains(r#""omit_browser_context":true"#));
+    let roundtrip: HostHTTPFetchRequest = serde_json::from_str(&req_json).unwrap();
+    assert_eq!(roundtrip, req);
 }
 
 // -----------------------------------------------------------------------------

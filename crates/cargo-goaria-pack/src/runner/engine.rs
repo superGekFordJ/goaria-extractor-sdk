@@ -5,12 +5,13 @@ use wasmi::{
 use goaria_extractor_sdk::abi::pack_result;
 use goaria_extractor_sdk::types::{
     HostAuthProfileStatusRequest, HostAuthProfileStatusResponse, HostHTTPFetchRequest,
-    HostHTTPFetchResponse,
+    HostHTTPFetchResponse, HostRegisterDownloadAuthRequest, HostRegisterDownloadAuthResponse,
+    HostTimeRequest, HostTimeResponse,
 };
 
 use crate::manifest::Manifest;
 use crate::runner::auth_provider::AuthProvider;
-use crate::runner::host_broker::HostBroker;
+use crate::runner::host_broker::{DownloadAuthRegistry, HostBroker};
 use crate::runner::limits::{
     HostCallBudget, MAX_HOST_IMPORT_REQUEST_BYTES, MAX_HOST_IMPORT_RESPONSE_BYTES,
 };
@@ -45,6 +46,39 @@ fn decode_status_request(
     })
 }
 
+/// Same decode-error contract for the register_download_auth import.
+fn decode_register_request(
+    req_bytes: &[u8],
+) -> Result<HostRegisterDownloadAuthRequest, HostRegisterDownloadAuthResponse> {
+    serde_json::from_slice(req_bytes).map_err(|error| HostRegisterDownloadAuthResponse {
+        ok: false,
+        error_code: Some("invalid_request".to_string()),
+        message: Some(error.to_string()),
+        ..Default::default()
+    })
+}
+
+/// Same decode-error contract for the host_time import; the wire shape is an
+/// empty object, so any field decodes as invalid_request.
+fn decode_time_request(req_bytes: &[u8]) -> Result<HostTimeRequest, HostTimeResponse> {
+    serde_json::from_slice(req_bytes).map_err(|error| HostTimeResponse {
+        ok: false,
+        error_code: Some("invalid_request".to_string()),
+        message: Some(error.to_string()),
+        ..Default::default()
+    })
+}
+
+/// Strip the entire query from a URL for debug output: query keys and values
+/// may carry secrets and must never reach stderr. A `?<redacted>` marker is
+/// appended when a query existed.
+fn redact_url_for_debug(url: &str) -> String {
+    match url.find('?') {
+        Some(index) => format!("{}?<redacted>", &url[..index]),
+        None => url.to_string(),
+    }
+}
+
 /// Compact payload returned when a serialized host-import response exceeds
 /// the wire cap; mirrors the host's response-size truncation contract.
 fn fetch_response_too_large_bytes() -> Vec<u8> {
@@ -59,6 +93,26 @@ fn fetch_response_too_large_bytes() -> Vec<u8> {
 
 fn status_response_too_large_bytes() -> Vec<u8> {
     serde_json::to_vec(&HostAuthProfileStatusResponse {
+        ok: false,
+        error_code: Some("response_too_large".to_string()),
+        message: Some("host import response exceeds size cap".to_string()),
+        ..Default::default()
+    })
+    .unwrap_or_default()
+}
+
+fn register_response_too_large_bytes() -> Vec<u8> {
+    serde_json::to_vec(&HostRegisterDownloadAuthResponse {
+        ok: false,
+        error_code: Some("response_too_large".to_string()),
+        message: Some("host import response exceeds size cap".to_string()),
+        ..Default::default()
+    })
+    .unwrap_or_default()
+}
+
+fn time_response_too_large_bytes() -> Vec<u8> {
+    serde_json::to_vec(&HostTimeResponse {
         ok: false,
         error_code: Some("response_too_large".to_string()),
         message: Some("host import response exceeds size cap".to_string()),
@@ -121,6 +175,11 @@ pub struct HostState {
     pub auth_provider: AuthProvider,
     pub memory_tracker: MemoryTracker,
     pub limits: StoreLimits,
+    /// Run-local download-auth registry: entries registered during this
+    /// invocation are validated against emitted item refs afterwards.
+    pub download_auth: DownloadAuthRegistry,
+    /// Invocation-scoped Unix timestamp snapshot served by host_time.
+    pub host_time_secs: i64,
 }
 
 /// In-process WebAssembly Execution Sandbox.
@@ -209,7 +268,27 @@ impl WasmEngine {
                 let broker = caller.data().broker.clone();
                 let auth_provider = caller.data().auth_provider.clone();
 
+                if std::env::var_os("GOARIA_PACK_DEBUG").is_some() {
+                    eprintln!(
+                        "[fetch] {} {} headers={:?}",
+                        req.method.as_deref().unwrap_or("GET"),
+                        req.url
+                            .as_deref()
+                            .map(redact_url_for_debug)
+                            .unwrap_or_else(|| "<ref-mode>".to_string()),
+                        req.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
+                    );
+                }
                 let resp = broker.handle_fetch(&manifest, &mut budget, req, &auth_provider);
+                if std::env::var_os("GOARIA_PACK_DEBUG").is_some() {
+                    eprintln!(
+                        "[fetch] <- ok={} status={:?} err={:?} headers={:?}",
+                        resp.ok,
+                        resp.status_code,
+                        resp.error_code,
+                        resp.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
+                    );
+                }
                 caller.data_mut().budget = budget;
 
                 let resp_bytes = match serde_json::to_vec(&resp) {
@@ -284,6 +363,131 @@ impl WasmEngine {
             },
         )?;
 
+        // Define host import: goaria_host.register_download_auth
+        linker.func_wrap(
+            "goaria_host",
+            "register_download_auth",
+            |mut caller: Caller<'_, HostState>, req_ptr: i32, req_len: i32| -> i64 {
+                if req_ptr <= 0 || req_len <= 0 || req_len as usize > MAX_HOST_IMPORT_REQUEST_BYTES
+                {
+                    return 0;
+                }
+
+                let memory = match caller.get_export("memory").and_then(Extern::into_memory) {
+                    Some(m) => m,
+                    None => return 0,
+                };
+
+                let mut req_bytes = vec![0u8; req_len as usize];
+                if memory
+                    .read(&caller, req_ptr as usize, &mut req_bytes)
+                    .is_err()
+                {
+                    return 0;
+                }
+
+                let too_large = register_response_too_large_bytes();
+                let req: HostRegisterDownloadAuthRequest = match decode_register_request(&req_bytes)
+                {
+                    Ok(r) => r,
+                    Err(resp) => {
+                        let mut budget = caller.data().budget.clone();
+                        let resp = match budget.consume() {
+                            Ok(()) => {
+                                caller.data_mut().budget = budget;
+                                resp
+                            }
+                            Err(e) => HostRegisterDownloadAuthResponse {
+                                ok: false,
+                                error_code: Some("budget_exhausted".to_string()),
+                                message: Some(e.to_string()),
+                                ..Default::default()
+                            },
+                        };
+                        let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+                        return write_guest_response(&mut caller, &memory, bytes, &too_large);
+                    }
+                };
+
+                if std::env::var_os("GOARIA_PACK_DEBUG").is_some() {
+                    eprintln!("[register_download_auth] kind={}", req.kind);
+                }
+                let data = caller.data_mut();
+                let resp = data.broker.handle_register_download_auth(
+                    &data.manifest,
+                    &mut data.budget,
+                    req,
+                    &mut data.download_auth,
+                );
+
+                let resp_bytes = match serde_json::to_vec(&resp) {
+                    Ok(b) => b,
+                    Err(_) => return 0,
+                };
+
+                write_guest_response(&mut caller, &memory, resp_bytes, &too_large)
+            },
+        )?;
+
+        // Define host import: goaria_host.host_time
+        linker.func_wrap(
+            "goaria_host",
+            "host_time",
+            |mut caller: Caller<'_, HostState>, req_ptr: i32, req_len: i32| -> i64 {
+                if req_ptr <= 0 || req_len <= 0 || req_len as usize > MAX_HOST_IMPORT_REQUEST_BYTES
+                {
+                    return 0;
+                }
+
+                let memory = match caller.get_export("memory").and_then(Extern::into_memory) {
+                    Some(m) => m,
+                    None => return 0,
+                };
+
+                let mut req_bytes = vec![0u8; req_len as usize];
+                if memory
+                    .read(&caller, req_ptr as usize, &mut req_bytes)
+                    .is_err()
+                {
+                    return 0;
+                }
+
+                let too_large = time_response_too_large_bytes();
+                let _req: HostTimeRequest = match decode_time_request(&req_bytes) {
+                    Ok(r) => r,
+                    Err(resp) => {
+                        let mut budget = caller.data().budget.clone();
+                        let resp = match budget.consume() {
+                            Ok(()) => {
+                                caller.data_mut().budget = budget;
+                                resp
+                            }
+                            Err(e) => HostTimeResponse {
+                                ok: false,
+                                error_code: Some("budget_exhausted".to_string()),
+                                message: Some(e.to_string()),
+                                ..Default::default()
+                            },
+                        };
+                        let bytes = serde_json::to_vec(&resp).unwrap_or_default();
+                        return write_guest_response(&mut caller, &memory, bytes, &too_large);
+                    }
+                };
+
+                let data = caller.data_mut();
+                let resp = data
+                    .broker
+                    .handle_host_time(&mut data.budget, data.host_time_secs);
+
+                let resp_bytes = match serde_json::to_vec(&resp) {
+                    Ok(b) => b,
+                    Err(_) => return 0,
+                };
+
+                write_guest_response(&mut caller, &memory, resp_bytes, &too_large)
+            },
+        )?;
+
         let instance = linker
             .instantiate(&mut store, &self.module)?
             .start(&mut store)?;
@@ -302,11 +506,16 @@ impl WasmEngine {
 #[cfg(test)]
 mod tests {
     use super::{
-        approximate_instruction_budget, decode_fetch_request, decode_status_request,
-        fetch_response_too_large_bytes, status_response_too_large_bytes,
+        approximate_instruction_budget, decode_fetch_request, decode_register_request,
+        decode_status_request, decode_time_request, fetch_response_too_large_bytes,
+        redact_url_for_debug, register_response_too_large_bytes,
+        status_response_too_large_bytes, time_response_too_large_bytes,
     };
     use crate::runner::limits::MAX_HOST_IMPORT_RESPONSE_BYTES;
-    use goaria_extractor_sdk::types::{HostAuthProfileStatusResponse, HostHTTPFetchResponse};
+    use goaria_extractor_sdk::types::{
+        HostAuthProfileStatusResponse, HostHTTPFetchResponse,
+        HostRegisterDownloadAuthResponse, HostTimeResponse,
+    };
 
     #[test]
     fn oversized_response_fallback_is_compact_and_parseable() {
@@ -323,6 +532,18 @@ mod tests {
         let resp: HostAuthProfileStatusResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!resp.ok);
         assert_eq!(resp.error_code.as_deref(), Some("response_too_large"));
+
+        let bytes = register_response_too_large_bytes();
+        let resp: HostRegisterDownloadAuthResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("response_too_large"));
+        assert_eq!(resp.download_auth_ref, None);
+
+        let bytes = time_response_too_large_bytes();
+        let resp: HostTimeResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("response_too_large"));
+        assert_eq!(resp.unix_secs, None);
     }
 
     #[test]
@@ -341,6 +562,42 @@ mod tests {
         let err = decode_status_request(b"{]").unwrap_err();
         assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
         assert!(decode_status_request(br#"{"auth_profile_ref":"p1"}"#).is_ok());
+    }
+
+    #[test]
+    fn download_auth_and_host_time_decoders_are_strict() {
+        let err = decode_register_request(b"{]").unwrap_err();
+        assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        // unknown fields are rejected on the request DTO
+        let err = decode_register_request(
+            br#"{"kind":"bearer","token":"t","extra":1}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        assert!(decode_register_request(br#"{"kind":"bearer","token":"t"}"#).is_ok());
+
+        // host_time's wire shape is exactly {}; any field is invalid
+        let err = decode_time_request(br#"{"at":1}"#).unwrap_err();
+        assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        assert!(decode_time_request(b"{}").is_ok());
+    }
+
+    #[test]
+    fn debug_url_redaction_strips_the_entire_query() {
+        assert_eq!(
+            redact_url_for_debug("https://example.com/path"),
+            "https://example.com/path"
+        );
+        let redacted = redact_url_for_debug(
+            "https://example.com/path?token=secret123&other=value#frag",
+        );
+        assert_eq!(redacted, "https://example.com/path?<redacted>");
+        assert!(!redacted.contains("secret123"));
+        assert!(!redacted.contains("other"));
+        assert!(!redacted.contains("token"));
+        // fragment stays part of the stripped tail? '?' truncation drops it too
+        let bare_fragment = redact_url_for_debug("https://example.com/p#frag");
+        assert_eq!(bare_fragment, "https://example.com/p#frag");
     }
 
     #[test]

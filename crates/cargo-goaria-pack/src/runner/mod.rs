@@ -14,8 +14,8 @@ use crate::manifest::{Manifest, ManifestError};
 pub use crate::runner::auth_provider::AuthProvider;
 use crate::runner::engine::{HostState, WasmEngine};
 pub use crate::runner::host_broker::{
-    HostBroker, LiveBroker, MockBroker, MockBrokerRule, MockRequestExpectation, UrlPattern,
-    ValidatedFetchShape,
+    DownloadAuthRegistry, HostBroker, LiveBroker, MockBroker, MockBrokerRule,
+    MockRequestExpectation, UrlPattern, ValidatedFetchShape, MOCK_HOST_TIME_SECS,
 };
 pub use crate::runner::limits::{
     HostCallBudget, LimitsError, MAX_ABI_INPUT_BYTES, MAX_HOST_IMPORT_REQUEST_BYTES,
@@ -137,19 +137,28 @@ impl ExtractorRunner {
         };
         let input_bytes = serde_json::to_vec(&input)?;
 
-        let output_bytes = self.run_operation("goaria_match", &input_bytes)?;
+        let (output_bytes, _) = self.run_operation("goaria_match", &input_bytes)?;
         decode_match_output(&output_bytes)
     }
 
     /// Execute `goaria_extract` against a target URL.
     pub fn extract(&self, url: &str) -> Result<ExtractOutput, RunnerError> {
+        self.extract_with_registrations(url).map(|(output, _)| output)
+    }
+
+    /// Execute `goaria_extract` and also return the download-auth refs the
+    /// pack registered during that invocation, in registration order.
+    pub fn extract_with_registrations(
+        &self,
+        url: &str,
+    ) -> Result<(ExtractOutput, Vec<String>), RunnerError> {
         validate_abi_url(url, "extract input url")?;
         let input = ExtractInput {
             url: url.to_string(),
         };
         let input_bytes = serde_json::to_vec(&input)?;
 
-        let output_bytes = self.run_operation("goaria_extract", &input_bytes)?;
+        let (output_bytes, final_state) = self.run_operation("goaria_extract", &input_bytes)?;
         let output = decode_extract_output(&output_bytes)?;
 
         if output.items.len() > self.manifest.resource_limits.max_output_items as usize {
@@ -158,12 +167,16 @@ impl ExtractorRunner {
                 max: self.manifest.resource_limits.max_output_items as usize,
             }));
         }
-        validate_extract_output(&output)?;
+        validate_extract_output(&output, &final_state.download_auth)?;
 
-        Ok(output)
+        Ok((output, final_state.download_auth.registered_refs()))
     }
 
-    fn run_operation(&self, op_name: &str, input_bytes: &[u8]) -> Result<Vec<u8>, RunnerError> {
+    fn run_operation(
+        &self,
+        op_name: &str,
+        input_bytes: &[u8],
+    ) -> Result<(Vec<u8>, HostState), RunnerError> {
         if input_bytes.is_empty() || input_bytes.len() > MAX_ABI_INPUT_BYTES {
             return Err(RunnerError::Limits(LimitsError::RequestTooLarge {
                 actual: input_bytes.len(),
@@ -281,7 +294,7 @@ impl ExtractorRunner {
             final_state.memory_tracker.check_leaks()?;
         }
 
-        Ok(output_bytes)
+        Ok((output_bytes, final_state))
     }
 
     fn build_host_state(&self) -> HostState {
@@ -300,6 +313,11 @@ impl ExtractorRunner {
             auth_provider: self.options.auth_provider.clone(),
             memory_tracker: MemoryTracker::new(),
             limits,
+            download_auth: DownloadAuthRegistry::default(),
+            host_time_secs: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs() as i64)
+                .unwrap_or_default(),
         }
     }
 }
@@ -326,7 +344,20 @@ fn validate_match_output(output: &MatchOutput) -> Result<(), RunnerError> {
     Ok(())
 }
 
-fn validate_extract_output(output: &ExtractOutput) -> Result<(), RunnerError> {
+fn is_valid_download_auth_ref(reference: &str) -> bool {
+    let Some(hex_part) = reference.strip_prefix("dar-") else {
+        return false;
+    };
+    hex_part.len() == 32
+        && hex_part
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_extract_output(
+    output: &ExtractOutput,
+    download_auth: &DownloadAuthRegistry,
+) -> Result<(), RunnerError> {
     for (index, item) in output.items.iter().enumerate() {
         if item.size_bytes.is_some_and(|size| size < 0) {
             return Err(validation_error(format!(
@@ -345,6 +376,7 @@ fn validate_extract_output(output: &ExtractOutput) -> Result<(), RunnerError> {
             ("mime_type", item.mime_type.as_deref()),
             ("auth_profile_ref", item.auth_profile_ref.as_deref()),
             ("header_profile_ref", item.header_profile_ref.as_deref()),
+            ("download_auth_ref", item.download_auth_ref.as_deref()),
         ] {
             if let Some(value) = value {
                 if value.len() > MAX_ABI_STRING_FIELD_BYTES {
@@ -355,6 +387,24 @@ fn validate_extract_output(output: &ExtractOutput) -> Result<(), RunnerError> {
                 validate_safe_string(value, name).map_err(|error| {
                     validation_error(format!("extract output item {index}: {error}"))
                 })?;
+            }
+        }
+
+        if let Some(reference) = item.download_auth_ref.as_deref() {
+            if !is_valid_download_auth_ref(reference) {
+                return Err(validation_error(format!(
+                    "extract output item {index}: download_auth_ref must be dar- plus 32 lowercase hex characters"
+                )));
+            }
+            if download_auth.is_registered_token(reference) {
+                return Err(validation_error(format!(
+                    "extract output item {index}: download_auth_ref must be an opaque ref, not a registered token"
+                )));
+            }
+            if !download_auth.contains_ref(reference) {
+                return Err(validation_error(format!(
+                    "extract output item {index}: download_auth_ref was not registered during this invocation"
+                )));
             }
         }
 
@@ -525,6 +575,7 @@ fn validation_error(message: impl Into<String>) -> RunnerError {
 mod tests {
     use super::{
         decode_extract_output, decode_match_output, validate_abi_url, validate_extract_output,
+        DownloadAuthRegistry,
     };
     use goaria_extractor_sdk::types::{ExtractOutput, ExtractedItemRef};
     use std::collections::BTreeMap;
@@ -560,6 +611,7 @@ mod tests {
 
     #[test]
     fn extract_output_validation_matches_host_boundaries() {
+        let registry = DownloadAuthRegistry::default();
         let invalid_items = [
             ExtractedItemRef {
                 size_bytes: Some(-1),
@@ -583,7 +635,98 @@ mod tests {
         ];
 
         for item in invalid_items {
-            assert!(validate_extract_output(&ExtractOutput::single(item)).is_err());
+            assert!(
+                validate_extract_output(&ExtractOutput::single(item), &registry).is_err()
+            );
         }
+    }
+
+    #[test]
+    fn download_auth_ref_must_have_been_registered_this_run() {
+        use crate::runner::host_broker::HostBroker;
+        use crate::manifest::{Capability, Manifest, ResourceLimits, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::limits::HostCallBudget;
+        use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
+
+        let mut registry = DownloadAuthRegistry::default();
+        let manifest = Manifest {
+            pack_id: "test-pack".to_string(),
+            pack_version: "0.1.0".to_string(),
+            abi_version: 1,
+            description: None,
+            capabilities: vec![Capability(CAPABILITY_DOWNLOAD_AUTH.to_string())],
+            domains: Some(vec![]),
+            domain_policy_refs: None,
+            broker_policy_refs: None,
+            resource_limits: ResourceLimits::default(),
+            payload_sha256: None,
+        };
+        let broker = HostBroker::Mock(crate::runner::host_broker::MockBroker::new());
+        let mut budget = HostCallBudget::new(4);
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            HostRegisterDownloadAuthRequest {
+                kind: "bearer".to_string(),
+                token: "raw-token-value".to_string(),
+            },
+            &mut registry,
+        );
+        let minted = resp.download_auth_ref.unwrap();
+
+        // A properly registered ref passes.
+        let bound = ExtractedItemRef {
+            url: Some("https://example.com/file".to_string()),
+            download_auth_ref: Some(minted.clone()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(bound), &registry).is_ok());
+
+        // Malformed shapes fail.
+        for bad_ref in [
+            "dar-short",
+            "dar-0123456789ABCDEF0123456789abcdef",
+            "ref-0123456789abcdef0123456789abcdef",
+            "dar-0123456789abcdef0123456789abcdeg",
+        ] {
+            let item = ExtractedItemRef {
+                url: Some("https://example.com/file".to_string()),
+                download_auth_ref: Some(bad_ref.to_string()),
+                ..Default::default()
+            };
+            assert!(
+                validate_extract_output(&ExtractOutput::single(item), &registry).is_err(),
+                "ref {bad_ref} must fail"
+            );
+        }
+
+        // A well-shaped but unregistered (forged) ref fails.
+        let forged = ExtractedItemRef {
+            url: Some("https://example.com/file".to_string()),
+            download_auth_ref: Some("dar-ffffffffffffffffffffffffffffffff".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(forged), &registry).is_err());
+
+        // Echoing a registered raw token that happens to be dar-shaped fails:
+        // the value is a token, not the opaque ref minted for it.
+        let mut registry = DownloadAuthRegistry::default();
+        let mut budget = HostCallBudget::new(4);
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            HostRegisterDownloadAuthRequest {
+                kind: "bearer".to_string(),
+                token: "dar-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            },
+            &mut registry,
+        );
+        assert!(resp.ok, "dar-shaped token is still a valid bearer token");
+        let echoed = ExtractedItemRef {
+            url: Some("https://example.com/file".to_string()),
+            download_auth_ref: Some("dar-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(echoed), &registry).is_err());
     }
 }

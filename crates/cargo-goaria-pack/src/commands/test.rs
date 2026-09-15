@@ -24,7 +24,18 @@ pub enum TestCommandError {
     TestFailed(String),
 }
 
-fn load_fixtures_from_dir(dir: &Path, broker: &mut MockBroker) -> Result<(), TestCommandError> {
+/// Run-level assertions collected from fixture `assert` objects.
+#[derive(Debug, Default)]
+struct FixtureAssertions {
+    /// Exact number of download-auth refs a single extract run must register.
+    registered_download_auth_refs: Option<usize>,
+}
+
+fn load_fixtures_from_dir(
+    dir: &Path,
+    broker: &mut MockBroker,
+) -> Result<FixtureAssertions, TestCommandError> {
+    let mut assertions = FixtureAssertions::default();
     if !dir.exists() {
         return Err(TestCommandError::Fixture {
             path: dir.display().to_string(),
@@ -52,25 +63,26 @@ fn load_fixtures_from_dir(dir: &Path, broker: &mut MockBroker) -> Result<(), Tes
                     path: path.display().to_string(),
                     message: format!("invalid JSON syntax: {}", e),
                 })?;
-            parse_and_add_fixture_rules(&path, val, broker)?;
+            parse_and_add_fixture_rules(&path, val, broker, &mut assertions)?;
         }
     }
-    Ok(())
+    Ok(assertions)
 }
 
 fn parse_and_add_fixture_rules(
     path: &Path,
     val: serde_json::Value,
     broker: &mut MockBroker,
+    assertions: &mut FixtureAssertions,
 ) -> Result<(), TestCommandError> {
     match val {
         serde_json::Value::Array(items) => {
             for item in items {
-                add_single_fixture_rule(path, item, broker)?;
+                add_single_fixture_rule(path, item, broker, assertions)?;
             }
         }
         serde_json::Value::Object(_) => {
-            add_single_fixture_rule(path, val, broker)?;
+            add_single_fixture_rule(path, val, broker, assertions)?;
         }
         _ => {
             return Err(TestCommandError::Fixture {
@@ -86,6 +98,7 @@ fn add_single_fixture_rule(
     path: &Path,
     val: serde_json::Value,
     broker: &mut MockBroker,
+    assertions: &mut FixtureAssertions,
 ) -> Result<(), TestCommandError> {
     let object = val
         .as_object()
@@ -104,12 +117,23 @@ fn add_single_fixture_rule(
                 | "body_base64"
                 | "body"
                 | "expect"
+                | "assert"
         ) {
             return Err(fixture_error(
                 path,
                 format!("unknown fixture field '{field}'"),
             ));
         }
+    }
+
+    if let Some(assert_value) = object.get("assert") {
+        if object.len() != 1 {
+            return Err(fixture_error(
+                path,
+                "fixture 'assert' object must not mix with rule fields",
+            ));
+        }
+        return parse_run_assertions(path, assert_value, assertions);
     }
 
     let pattern_fields = ["url", "exact", "prefix", "pattern"];
@@ -267,7 +291,12 @@ fn parse_request_expectation(
     for field in object.keys() {
         if !matches!(
             field.as_str(),
-            "method" | "headers" | "body_base64" | "broker_policy_ref" | "endpoint_ref"
+            "method"
+                | "headers"
+                | "body_base64"
+                | "broker_policy_ref"
+                | "endpoint_ref"
+                | "omit_browser_context"
         ) {
             return Err(fixture_error(
                 path,
@@ -356,6 +385,14 @@ fn parse_request_expectation(
         ),
         None => None,
     };
+    let omit_browser_context = match object.get("omit_browser_context") {
+        Some(value) => Some(
+            value
+                .as_bool()
+                .ok_or_else(|| fixture_error(path, "expect.omit_browser_context must be a boolean"))?,
+        ),
+        None => None,
+    };
 
     Ok(MockRequestExpectation {
         method,
@@ -363,7 +400,39 @@ fn parse_request_expectation(
         body_base64,
         broker_policy_ref,
         endpoint_ref,
+        omit_browser_context,
     })
+}
+
+/// Parse `{"assert": {...}}` fixture objects. Supported keys:
+/// `registered_download_auth_refs` — exact count of refs the pack must
+/// register during a single extract run.
+fn parse_run_assertions(
+    path: &Path,
+    value: &serde_json::Value,
+    assertions: &mut FixtureAssertions,
+) -> Result<(), TestCommandError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| fixture_error(path, "fixture 'assert' must be an object"))?;
+    for field in object.keys() {
+        if field.as_str() != "registered_download_auth_refs" {
+            return Err(fixture_error(
+                path,
+                format!("unknown assert field '{field}'"),
+            ));
+        }
+    }
+    if let Some(value) = object.get("registered_download_auth_refs") {
+        let count = value
+            .as_u64()
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| {
+                fixture_error(path, "assert.registered_download_auth_refs must be a non-negative integer")
+            })?;
+        assertions.registered_download_auth_refs = Some(count);
+    }
+    Ok(())
 }
 
 fn required_fixture_string<'a>(
@@ -430,6 +499,7 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
 
     let start = Instant::now();
     let runner = ExtractorRunner::new(&wasm_bytes, manifest.clone())?;
+    let mut assertions = FixtureAssertions::default();
     let runner = if args.live {
         runner.with_live_broker()
     } else {
@@ -455,7 +525,7 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
                 "[✓]".green(),
                 fixtures_dir.display()
             );
-            load_fixtures_from_dir(&fixtures_dir, &mut mock_broker)?;
+            assertions = load_fixtures_from_dir(&fixtures_dir, &mut mock_broker)?;
         }
 
         runner.with_mock_broker(mock_broker)
@@ -494,10 +564,28 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
 
                         // Test extract
                         print!("  test extract('{}') ... ", test_url);
-                        match runner.extract(&test_url) {
-                            Ok(extract_out) => {
+                        match runner.extract_with_registrations(&test_url) {
+                            Ok((extract_out, registered_refs)) => {
                                 println!("{} (items: {})", "ok".green(), extract_out.items.len());
                                 passed += 1;
+                                if let Some(expected) = assertions.registered_download_auth_refs {
+                                    print!(
+                                        "  test download-auth registrations({}) ... ",
+                                        test_url
+                                    );
+                                    if registered_refs.len() == expected {
+                                        println!("{} (refs: {})", "ok".green(), expected);
+                                        passed += 1;
+                                    } else {
+                                        println!(
+                                            "{} (expected {} refs, got {})",
+                                            "FAILED".red().bold(),
+                                            expected,
+                                            registered_refs.len()
+                                        );
+                                        failed += 1;
+                                    }
+                                }
                             }
                             Err(e) => {
                                 println!("{} ({})", "FAILED".red().bold(), e);

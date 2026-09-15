@@ -7,6 +7,8 @@ const abi = @import("abi.zig");
 pub const raw = if (builtin.target.cpu.arch.isWasm()) struct {
     pub extern "goaria_host" fn http_fetch(req_ptr: i32, req_len: i32) i64;
     pub extern "goaria_host" fn auth_profile_status(req_ptr: i32, req_len: i32) i64;
+    pub extern "goaria_host" fn register_download_auth(req_ptr: i32, req_len: i32) i64;
+    pub extern "goaria_host" fn host_time(req_ptr: i32, req_len: i32) i64;
 } else struct {
     pub fn http_fetch(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
@@ -14,6 +16,16 @@ pub const raw = if (builtin.target.cpu.arch.isWasm()) struct {
         return 0;
     }
     pub fn auth_profile_status(req_ptr: i32, req_len: i32) i64 {
+        _ = req_ptr;
+        _ = req_len;
+        return 0;
+    }
+    pub fn register_download_auth(req_ptr: i32, req_len: i32) i64 {
+        _ = req_ptr;
+        _ = req_len;
+        return 0;
+    }
+    pub fn host_time(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
         _ = req_len;
         return 0;
@@ -48,6 +60,30 @@ pub const HostBroker = struct {
         const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
 
         const result_packed = raw.auth_profile_status(req_ptr, req_len);
+        if (result_packed == 0) return Error.HostCallFailed;
+
+        const unpacked = abi.unpackResult(@bitCast(result_packed));
+        return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
+    }
+
+    /// Raw low-level invocation of goaria_host.register_download_auth.
+    pub fn rawRegisterDownloadAuth(request_json_bytes: []const u8) Error!abi.GuestBuffer {
+        const req_len: i32 = @intCast(request_json_bytes.len);
+        const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
+
+        const result_packed = raw.register_download_auth(req_ptr, req_len);
+        if (result_packed == 0) return Error.HostCallFailed;
+
+        const unpacked = abi.unpackResult(@bitCast(result_packed));
+        return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
+    }
+
+    /// Raw low-level invocation of goaria_host.host_time.
+    pub fn rawHostTime(request_json_bytes: []const u8) Error!abi.GuestBuffer {
+        const req_len: i32 = @intCast(request_json_bytes.len);
+        const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
+
+        const result_packed = raw.host_time(req_ptr, req_len);
         if (result_packed == 0) return Error.HostCallFailed;
 
         const unpacked = abi.unpackResult(@bitCast(result_packed));
@@ -181,6 +217,57 @@ pub const HostBroker = struct {
         defer parsed.deinit();
 
         return parsed.value.ok and (parsed.value.available orelse false);
+    }
+
+    /// Register a pack-minted bearer token with the host download-auth
+    /// channel. On success the caller owns the parsed response whose
+    /// `download_auth_ref` is the opaque ref to bind onto emitted items.
+    /// Requires the manifest to declare `cap.download.auth`.
+    pub fn registerDownloadAuth(
+        allocator: std.mem.Allocator,
+        token: []const u8,
+    ) Error!std.json.Parsed(types.HostRegisterDownloadAuthResponse) {
+        const req = types.HostRegisterDownloadAuthRequest{
+            .kind = "bearer",
+            .token = token,
+        };
+        const req_json = std.fmt.allocPrint(
+            allocator,
+            "{f}",
+            .{std.json.fmt(req, .{ .emit_null_optional_fields = false })},
+        ) catch return Error.HostCallFailed;
+        defer allocator.free(req_json);
+
+        var buf = try rawRegisterDownloadAuth(req_json);
+        defer buf.deinit();
+
+        return std.json.parseFromSlice(
+            types.HostRegisterDownloadAuthResponse,
+            allocator,
+            buf.slice(),
+            .{ .ignore_unknown_fields = true },
+        ) catch Error.JsonParseError;
+    }
+
+    /// Invocation-scoped Unix timestamp snapshot from the host. Each call
+    /// consumes one host-call budget unit.
+    pub fn hostTime(allocator: std.mem.Allocator) Error!i64 {
+        const req_json = "{}";
+
+        var buf = try rawHostTime(req_json);
+        defer buf.deinit();
+
+        var parsed = std.json.parseFromSlice(
+            types.HostTimeResponse,
+            allocator,
+            buf.slice(),
+            .{ .ignore_unknown_fields = true },
+        ) catch return Error.JsonParseError;
+        defer parsed.deinit();
+
+        const resp = parsed.value;
+        if (!resp.ok) return Error.HttpError;
+        return resp.unix_secs orelse Error.InvalidResponseBuffer;
     }
 };
 

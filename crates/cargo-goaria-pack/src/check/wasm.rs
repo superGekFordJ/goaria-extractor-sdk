@@ -1,5 +1,8 @@
 use crate::commands::build::BuildError;
-use crate::manifest::{Manifest, ManifestError, CAPABILITY_AUTH_PROFILE, CAPABILITY_HTTP_FETCH};
+use crate::manifest::{
+    Manifest, ManifestError, CAPABILITY_AUTH_PROFILE, CAPABILITY_DOWNLOAD_AUTH,
+    CAPABILITY_HTTP_FETCH,
+};
 use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use wasmparser::{ExternalKind, Parser, Payload, ValType};
@@ -364,6 +367,16 @@ pub fn verify_wasm_and_manifest(
                     });
                 }
             }
+            "register_download_auth" => {
+                if !manifest.has_capability(CAPABILITY_DOWNLOAD_AUTH) {
+                    return Err(CheckError::MissingCapabilityForImport {
+                        import: "goaria_host.register_download_auth".to_string(),
+                        capability: CAPABILITY_DOWNLOAD_AUTH.to_string(),
+                    });
+                }
+            }
+            // The invocation-scoped time snapshot carries no secrets.
+            "host_time" => {}
             other => {
                 return Err(CheckError::ForbiddenImportFunction {
                     module: module.clone(),

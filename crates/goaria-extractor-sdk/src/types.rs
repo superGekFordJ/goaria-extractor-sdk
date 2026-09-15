@@ -10,6 +10,9 @@ pub const CAPABILITY_HTTP_FETCH: &str = "cap.http.fetch";
 pub const CAPABILITY_HTTP_FETCH_EXTENDED: &str = "cap.http.fetch.extended";
 /// Manifest capability: use host-custody auth profiles.
 pub const CAPABILITY_AUTH_PROFILE: &str = "cap.auth.profile";
+/// Manifest capability: register a self-minted bearer credential for the
+/// materialized download Authorization header.
+pub const CAPABILITY_DOWNLOAD_AUTH: &str = "cap.download.auth";
 
 /// Input payload passed to goaria_match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +107,10 @@ pub struct ExtractedItemRef {
     pub auth_profile_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub header_profile_ref: Option<String>,
+    /// Opaque host-registered download-auth reference (`dar-` + 32 lowercase
+    /// hex). Mutually exclusive with auth_profile_ref / header_profile_ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_auth_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<BTreeMap<String, String>>,
 }
@@ -142,6 +149,11 @@ pub struct HostHTTPFetchRequest {
     pub timeout_millis: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_response_bytes: Option<i64>,
+    /// Opt this self-authenticated fetch out of browser grant/cookie
+    /// matching and typed browser fields. Must not combine with
+    /// auth_profile_ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub omit_browser_context: Option<bool>,
 }
 
 /// Response payload received from host import goaria_host.http_fetch.
@@ -191,6 +203,50 @@ pub struct HostAuthProfileStatusResponse {
     pub kind: Option<AuthSecretKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub redacted_display: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Request payload sent to host import goaria_host.register_download_auth.
+/// Only `kind = "bearer"` exists; the token never leaves the host except as
+/// the materialized Authorization header.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostRegisterDownloadAuthRequest {
+    pub kind: String,
+    pub token: String,
+}
+
+/// Response payload received from goaria_host.register_download_auth.
+/// Unknown fields are tolerated so newer hosts stay decodable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HostRegisterDownloadAuthResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub download_auth_ref: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Request payload sent to host import goaria_host.host_time. The wire shape
+/// is intentionally empty: any field is an invalid_request on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct HostTimeRequest {}
+
+/// Response payload received from goaria_host.host_time.
+/// Unknown fields are tolerated so newer hosts stay decodable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct HostTimeResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unix_secs: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

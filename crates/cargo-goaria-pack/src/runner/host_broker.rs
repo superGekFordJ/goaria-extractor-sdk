@@ -1,11 +1,14 @@
 use crate::manifest::{
     schema::MAX_RESPONSE_BYTES, validate_opaque_policy_ref, Manifest, CAPABILITY_AUTH_PROFILE,
-    CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
+    CAPABILITY_DOWNLOAD_AUTH, CAPABILITY_HTTP_FETCH, CAPABILITY_HTTP_FETCH_EXTENDED,
 };
 use crate::runner::auth_provider::AuthProvider;
 use crate::runner::limits::HostCallBudget;
 use base64::Engine;
-use goaria_extractor_sdk::types::{HostHTTPFetchRequest, HostHTTPFetchResponse};
+use goaria_extractor_sdk::types::{
+    HostHTTPFetchRequest, HostHTTPFetchResponse, HostRegisterDownloadAuthRequest,
+    HostRegisterDownloadAuthResponse, HostTimeResponse,
+};
 use regex::Regex;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, Read};
@@ -651,6 +654,11 @@ fn validate_extended_fetch_shape(
             "extended fetch request must not use an auth profile",
         ));
     }
+    if req.omit_browser_context.unwrap_or(false) && opt_nonempty(&req.auth_profile_ref).is_some() {
+        return Err(FetchDeny::invalid_request(
+            "omit_browser_context forbids auth_profile_ref",
+        ));
+    }
     Ok(ValidatedFetchShape {
         method,
         body,
@@ -1128,6 +1136,8 @@ pub struct MockRequestExpectation {
     pub broker_policy_ref: Option<String>,
     /// Exact endpoint_ref match (ref-mode requests).
     pub endpoint_ref: Option<String>,
+    /// Exact omit_browser_context flag match (absent request field reads as false).
+    pub omit_browser_context: Option<bool>,
 }
 
 /// Mock rule for simulating broker responses during tests.
@@ -1186,6 +1196,11 @@ impl MockBrokerRule {
         }
         if let Some(endpoint_ref) = &expect.endpoint_ref {
             if req.endpoint_ref.as_deref() != Some(endpoint_ref.as_str()) {
+                return false;
+            }
+        }
+        if let Some(expected) = expect.omit_browser_context {
+            if req.omit_browser_context.unwrap_or(false) != expected {
                 return false;
             }
         }
@@ -1483,6 +1498,63 @@ fn process_response(
     }
 }
 
+/// Deterministic host-time value served to mock runs; keeps fixtures and
+/// pack logic (e.g. website-token derivation) reproducible.
+pub const MOCK_HOST_TIME_SECS: i64 = 1_800_000_000;
+
+/// Run-local record of pack-registered bearer tokens keyed by the opaque
+/// refs handed back to the guest. Refs are minted deterministically
+/// (`dar-` + 32-hex counter) so mock runs stay reproducible; the token
+/// values never leave the host side except as materialized headers.
+#[derive(Debug, Clone, Default)]
+pub struct DownloadAuthRegistry {
+    counter: u64,
+    entries: BTreeMap<String, String>,
+}
+
+impl DownloadAuthRegistry {
+    fn register(&mut self, token: &str) -> String {
+        self.counter += 1;
+        let reference = format!("dar-{:032x}", self.counter);
+        self.entries.insert(reference.clone(), token.to_string());
+        reference
+    }
+
+    /// True when `reference` was minted during this run.
+    pub fn contains_ref(&self, reference: &str) -> bool {
+        self.entries.contains_key(reference)
+    }
+
+    /// True when `value` is one of the raw tokens stored this run — used to
+    /// catch a guest echoing the token itself back as an item ref.
+    pub fn is_registered_token(&self, value: &str) -> bool {
+        self.entries.values().any(|token| token == value)
+    }
+
+    /// All refs minted during this run, in registration order.
+    pub fn registered_refs(&self) -> Vec<String> {
+        self.entries.keys().cloned().collect()
+    }
+}
+
+const DOWNLOAD_AUTH_TOKEN_MAX_BYTES: usize = 8192;
+
+/// Mirror of the host token contract: 1..=8192 bytes, no CR/LF, and never
+/// already prefixed with a bearer scheme (which would double-prefix the
+/// materialized header).
+fn validate_download_auth_token(token: &str) -> Result<(), &'static str> {
+    if token.is_empty() || token.len() > DOWNLOAD_AUTH_TOKEN_MAX_BYTES {
+        return Err("token length must be between 1 and 8192 bytes");
+    }
+    if token.contains('\r') || token.contains('\n') {
+        return Err("token must not contain CR/LF");
+    }
+    if token.len() >= "bearer ".len() && token[.."bearer ".len()].eq_ignore_ascii_case("bearer ") {
+        return Err("token must not include a bearer scheme prefix");
+    }
+    Ok(())
+}
+
 /// Top-level broker dispatch enum.
 #[derive(Debug, Clone)]
 pub enum HostBroker {
@@ -1624,6 +1696,100 @@ impl HostBroker {
                 ok: false,
                 error_code: Some("broker_disabled".to_string()),
                 message: Some("host network broker is disabled".to_string()),
+                ..Default::default()
+            },
+        }
+    }
+
+    /// Handle goaria_host.register_download_auth: budget → kind/token
+    /// checks → capability → mint an opaque ref recorded in the run-local
+    /// registry. Both Mock and Live mint the same deterministic shape.
+    pub fn handle_register_download_auth(
+        &self,
+        manifest: &Manifest,
+        budget: &mut HostCallBudget,
+        req: HostRegisterDownloadAuthRequest,
+        registry: &mut DownloadAuthRegistry,
+    ) -> HostRegisterDownloadAuthResponse {
+        if let Err(e) = budget.consume() {
+            return HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("budget_exhausted".to_string()),
+                message: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+        if req.kind != "bearer" {
+            return HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some("kind must be bearer".to_string()),
+                ..Default::default()
+            };
+        }
+        if let Err(message) = validate_download_auth_token(&req.token) {
+            return HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("invalid_request".to_string()),
+                message: Some(message.to_string()),
+                ..Default::default()
+            };
+        }
+        if !manifest.has_capability(CAPABILITY_DOWNLOAD_AUTH) {
+            return HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("policy_denied".to_string()),
+                message: Some("pack is not allowed to register download auth".to_string()),
+                ..Default::default()
+            };
+        }
+        if matches!(self, Self::Disabled) {
+            return HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("not_configured".to_string()),
+                message: Some("download auth registry is not configured".to_string()),
+                ..Default::default()
+            };
+        }
+
+        HostRegisterDownloadAuthResponse {
+            ok: true,
+            download_auth_ref: Some(registry.register(&req.token)),
+            ..Default::default()
+        }
+    }
+
+    /// Handle goaria_host.host_time: one budget unit per call, same frozen
+    /// snapshot for the whole run. Mock serves the deterministic constant;
+    /// Live serves the invocation snapshot captured at run start.
+    pub fn handle_host_time(
+        &self,
+        budget: &mut HostCallBudget,
+        snapshot_secs: i64,
+    ) -> HostTimeResponse {
+        if let Err(e) = budget.consume() {
+            return HostTimeResponse {
+                ok: false,
+                error_code: Some("budget_exhausted".to_string()),
+                message: Some(e.to_string()),
+                ..Default::default()
+            };
+        }
+        match self {
+            Self::Mock(_) => HostTimeResponse {
+                ok: true,
+                unix_secs: Some(MOCK_HOST_TIME_SECS),
+                ..Default::default()
+            },
+            Self::Live(_) => HostTimeResponse {
+                ok: true,
+                unix_secs: Some(snapshot_secs),
+                ..Default::default()
+            },
+            Self::Disabled => HostTimeResponse {
+                ok: false,
+                error_code: Some("not_configured".to_string()),
+                message: Some("host time is not configured".to_string()),
                 ..Default::default()
             },
         }
@@ -2220,5 +2386,206 @@ mod tests {
         for bad in ["", "A", "-a", "a-", "a_b", "a.b"] {
             assert!(!is_valid_profile_slug(bad), "{bad} should fail");
         }
+    }
+
+    #[test]
+    fn register_download_auth_mints_deterministic_refs_and_records_tokens() {
+        use super::{DownloadAuthRegistry, HostBroker};
+        use crate::manifest::{Capability, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::limits::HostCallBudget;
+        use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
+
+        let mut manifest = manifest_with_domains(&["example.com"]);
+        manifest
+            .capabilities
+            .push(Capability(CAPABILITY_DOWNLOAD_AUTH.to_string()));
+
+        let broker = HostBroker::Mock(MockBroker::new());
+        let mut registry = DownloadAuthRegistry::default();
+        let mut budget = HostCallBudget::new(10);
+
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            HostRegisterDownloadAuthRequest {
+                kind: "bearer".to_string(),
+                token: "guest-token-1".to_string(),
+            },
+            &mut registry,
+        );
+        assert!(resp.ok, "unexpected deny: {:?}", resp);
+        let first_ref = resp.download_auth_ref.unwrap();
+        assert_eq!(first_ref, "dar-00000000000000000000000000000001");
+
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            HostRegisterDownloadAuthRequest {
+                kind: "bearer".to_string(),
+                token: "guest-token-2".to_string(),
+            },
+            &mut registry,
+        );
+        assert!(resp.ok);
+        let second_ref = resp.download_auth_ref.unwrap();
+        assert_eq!(second_ref, "dar-00000000000000000000000000000002");
+        assert_ne!(first_ref, second_ref);
+
+        assert!(registry.contains_ref(&first_ref));
+        assert!(registry.is_registered_token("guest-token-1"));
+        assert!(!registry.is_registered_token("dar-00000000000000000000000000000001"));
+        assert_eq!(
+            registry.registered_refs(),
+            vec![first_ref.clone(), second_ref]
+        );
+    }
+
+    #[test]
+    fn register_download_auth_enforces_kind_token_capability_and_budget() {
+        use super::{DownloadAuthRegistry, HostBroker};
+        use crate::manifest::{Capability, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::limits::HostCallBudget;
+        use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
+
+        let mut manifest = manifest_with_domains(&["example.com"]);
+        manifest
+            .capabilities
+            .push(Capability(CAPABILITY_DOWNLOAD_AUTH.to_string()));
+        let broker = HostBroker::Mock(MockBroker::new());
+
+        let request = |kind: &str, token: &str| HostRegisterDownloadAuthRequest {
+            kind: kind.to_string(),
+            token: token.to_string(),
+        };
+
+        // budget consumed first: a zero-budget run denies with budget_exhausted
+        let mut registry = DownloadAuthRegistry::default();
+        let mut budget = HostCallBudget::new(0);
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            request("bearer", "tok"),
+            &mut registry,
+        );
+        assert_eq!(resp.error_code.as_deref(), Some("budget_exhausted"));
+
+        // wrong kind
+        let mut registry = DownloadAuthRegistry::default();
+        let mut budget = HostCallBudget::new(10);
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            request("cookie", "tok"),
+            &mut registry,
+        );
+        assert_eq!(resp.error_code.as_deref(), Some("invalid_request"));
+
+        // invalid tokens: empty, CRLF, double-prefixed bearer
+        for token in ["", "tok\nen", "tok\r\nen", "Bearer abc", "bearer abc"] {
+            let resp = broker.handle_register_download_auth(
+                &manifest,
+                &mut budget,
+                request("bearer", token),
+                &mut registry,
+            );
+            assert_eq!(
+                resp.error_code.as_deref(),
+                Some("invalid_request"),
+                "token {token:?} must be denied"
+            );
+        }
+
+        // missing capability
+        let mut no_cap = manifest_with_domains(&["example.com"]);
+        no_cap.capabilities.clear();
+        let resp = broker.handle_register_download_auth(
+            &no_cap,
+            &mut budget,
+            request("bearer", "tok"),
+            &mut registry,
+        );
+        assert_eq!(resp.error_code.as_deref(), Some("policy_denied"));
+
+        // disabled broker is not configured for registration
+        let resp = HostBroker::Disabled.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            request("bearer", "tok"),
+            &mut registry,
+        );
+        assert_eq!(resp.error_code.as_deref(), Some("not_configured"));
+    }
+
+    #[test]
+    fn host_time_serves_mock_constant_and_live_snapshot() {
+        use super::{HostBroker, MOCK_HOST_TIME_SECS};
+        use crate::runner::limits::HostCallBudget;
+
+        let mut budget = HostCallBudget::new(3);
+        let mock = HostBroker::Mock(MockBroker::new());
+        let resp = mock.handle_host_time(&mut budget, 12345);
+        assert!(resp.ok);
+        assert_eq!(resp.unix_secs, Some(MOCK_HOST_TIME_SECS));
+
+        let live = HostBroker::Live(LiveBroker::new());
+        let resp = live.handle_host_time(&mut budget, 12345);
+        assert!(resp.ok);
+        assert_eq!(resp.unix_secs, Some(12345));
+
+        let resp = HostBroker::Disabled.handle_host_time(&mut budget, 12345);
+        assert_eq!(resp.error_code.as_deref(), Some("not_configured"));
+
+        // each call consumed one budget unit; the next is exhausted
+        let resp = mock.handle_host_time(&mut budget, 12345);
+        assert_eq!(resp.error_code.as_deref(), Some("budget_exhausted"));
+    }
+
+    #[test]
+    fn omit_browser_context_conflicts_with_auth_profile_and_matches_expectation() {
+        use super::MockRequestExpectation;
+
+        // validate_extended_fetch_shape: omit + auth_profile_ref is invalid
+        let req = HostHTTPFetchRequest {
+            url: Some("https://example.com/x".to_string()),
+            auth_profile_ref: Some("prof-1".to_string()),
+            omit_browser_context: Some(true),
+            ..Default::default()
+        };
+        assert!(validate_extended_fetch_shape(&req).is_err());
+
+        // omit alone passes shape validation
+        let req = HostHTTPFetchRequest {
+            url: Some("https://example.com/x".to_string()),
+            omit_browser_context: Some(true),
+            ..Default::default()
+        };
+        assert!(validate_extended_fetch_shape(&req).is_ok());
+
+        // mock expectation matching honors the flag
+        let rule = MockBrokerRule {
+            pattern: UrlPattern::Exact("https://example.com/x".to_string()),
+            status_code: 200,
+            headers: BTreeMap::new(),
+            body: Vec::new(),
+            expect: Some(MockRequestExpectation {
+                omit_browser_context: Some(true),
+                ..Default::default()
+            }),
+        };
+        let shape = ValidatedFetchShape {
+            method: "GET".to_string(),
+            ..Default::default()
+        };
+        let omitting = HostHTTPFetchRequest {
+            url: Some("https://example.com/x".to_string()),
+            omit_browser_context: Some(true),
+            ..Default::default()
+        };
+        assert!(rule.matches_request(&omitting, &shape));
+        let default_req = HostHTTPFetchRequest {
+            url: Some("https://example.com/x".to_string()),
+            ..Default::default()
+        };
+        assert!(!rule.matches_request(&default_req, &shape));
     }
 }

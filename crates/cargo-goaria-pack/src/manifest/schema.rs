@@ -9,6 +9,7 @@ pub const CAPABILITY_PARSE_WASM: &str = "cap.parse.wasm";
 pub const CAPABILITY_HTTP_FETCH: &str = "cap.http.fetch";
 pub const CAPABILITY_HTTP_FETCH_EXTENDED: &str = "cap.http.fetch.extended";
 pub const CAPABILITY_AUTH_PROFILE: &str = "cap.auth.profile";
+pub const CAPABILITY_DOWNLOAD_AUTH: &str = "cap.download.auth";
 
 pub const MAX_TIMEOUT_MILLIS: u64 = 10_000;
 pub const MAX_MEMORY_PAGES: u32 = 256;
@@ -77,6 +78,10 @@ impl Capability {
 
     pub fn auth_profile() -> Self {
         Self(CAPABILITY_AUTH_PROFILE.to_string())
+    }
+
+    pub fn download_auth() -> Self {
+        Self(CAPABILITY_DOWNLOAD_AUTH.to_string())
     }
 }
 
@@ -426,7 +431,8 @@ pub fn validate_capabilities(capabilities: &[Capability]) -> Result<(), Manifest
             CAPABILITY_PARSE_WASM => {
                 has_parse_wasm = true;
             }
-            CAPABILITY_HTTP_FETCH | CAPABILITY_HTTP_FETCH_EXTENDED | CAPABILITY_AUTH_PROFILE => {}
+            CAPABILITY_HTTP_FETCH | CAPABILITY_HTTP_FETCH_EXTENDED | CAPABILITY_AUTH_PROFILE
+            | CAPABILITY_DOWNLOAD_AUTH => {}
             _ => {
                 return Err(ManifestError::DisallowedCapability(cap.0.clone()));
             }
