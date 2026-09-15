@@ -29,6 +29,8 @@ Extractors are sandboxed WebAssembly modules (`wasm32-unknown-unknown` for Rust,
 |  |   Imports ("goaria_host"):                                              |  |
 |  |     - http_fetch(ptr, len) -> i64                                       |  |
 |  |     - auth_profile_status(ptr, len) -> i64                              |  |
+|  |     - register_download_auth(ptr, len) -> i64                           |  |
+|  |     - host_time(ptr, len) -> i64                                        |  |
 |  |                                                                         |  |
 |  |   Linear Memory:                                                        |  |
 |  |     Exported as "memory" (64KB WebAssembly pages)                       |  |
@@ -158,6 +160,28 @@ int64_t auth_profile_status(int32_t req_ptr, int32_t req_len);
   - `req_len` — length of request JSON string in bytes.
 - **Return Value**: Packed 64-bit integer pointing to UTF-8 encoded `HostAuthProfileStatusResponse` JSON string in guest memory.
 
+### 4.3 `goaria_host.register_download_auth`
+```c
+// Required capability: "cap.download.auth"
+int64_t register_download_auth(int32_t req_ptr, int32_t req_len);
+```
+- **Description**: Registers a pack-minted credential (currently only `kind: "bearer"`) into the host download-auth registry and returns an opaque `download_auth_ref`. The raw token never appears in any response, ABI output, log, or persisted state; the host later materializes it as the `Authorization: Bearer <token>` header of the bound download task. See §6.4 for the registry lifecycle.
+- **Parameters**:
+  - `req_ptr` — pointer to UTF-8 encoded `HostRegisterDownloadAuthRequest` JSON string.
+  - `req_len` — length of request JSON string in bytes.
+- **Return Value**: Packed 64-bit integer pointing to UTF-8 encoded `HostRegisterDownloadAuthResponse` JSON string in guest memory.
+
+### 4.4 `goaria_host.host_time`
+```c
+// Required capability: none
+int64_t host_time(int32_t req_ptr, int32_t req_len);
+```
+- **Description**: Returns the host Unix timestamp snapshot for the current invocation. The value is frozen for the duration of one invocation, so repeated calls inside the same `goaria_extract` return identical timestamps; each call still consumes one host-call budget unit.
+- **Parameters**:
+  - `req_ptr` — pointer to UTF-8 encoded `HostTimeRequest` JSON string. The wire shape is the empty object `{}`; any field is rejected as `invalid_request`.
+  - `req_len` — length of request JSON string in bytes.
+- **Return Value**: Packed 64-bit integer pointing to UTF-8 encoded `HostTimeResponse` JSON string in guest memory.
+
 ---
 
 ## 5. Data Transfer Objects (JSON DTOs)
@@ -206,6 +230,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
       "mime_type": "application/octet-stream",
       "auth_profile_ref": "default",
       "header_profile_ref": "standard_headers",
+      "download_auth_ref": "dar-0123456789abcdef0123456789abcdef",
       "metadata": {
         "source": "fixture-pack"
       }
@@ -220,6 +245,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `items[].mime_type` (`string`, optional): Content MIME type.
 - `items[].auth_profile_ref` (`string`, optional): Opaque host authentication profile reference.
 - `items[].header_profile_ref` (`string`, optional): Opaque host header profile reference.
+- `items[].download_auth_ref` (`string`, optional): Opaque download-auth reference returned by `goaria_host.register_download_auth` (`dar-` + 32 lowercase hex). Mutually exclusive with `auth_profile_ref`/`header_profile_ref`. The host rejects refs that were not registered during the same invocation, refs belonging to another pack, and any value equal to a registered raw token.
 - `items[].metadata` (`map[string]string`, optional): Key-value contextual metadata.
 
 ### 5.3 `HostHTTPFetchRequest` & `HostHTTPFetchResponse`
@@ -245,6 +271,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `headers` (`map[string]string`, optional): Request headers. Safe names pass with `cap.http.fetch`; pack-owned `Authorization` and business `X-*` names additionally require `cap.http.fetch.extended`. Forbidden names (e.g. `Cookie`, `Host`, `Content-Length`) are always rejected.
 - `body_base64` (`string`, optional): Strict padded standard Base64 request body, decoded cap 16 KiB. Requires `method: "POST"` and exactly one `Content-Type` of `application/json` or `application/x-www-form-urlencoded`.
 - `auth_profile_ref` (`string`, optional): Host auth profile reference. Mutually exclusive with extended fetch features.
+- `omit_browser_context` (`bool`, optional): When `true`, the request is treated as self-authenticated: the host suppresses all browser-owned context (browser credential grants, cookies, `User-Agent`, `Accept-Language`, `Referer`) for this request. Mutually exclusive with `auth_profile_ref` — combining them is rejected as `invalid_request`.
 - `timeout_millis`, `max_response_bytes` (`int`, optional): Per-request limits; `0` or omitted means unset (effective value is the smallest positive of request, manifest, and policy maximum).
 
 #### `HostHTTPFetchResponse`
@@ -295,6 +322,54 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `kind` (`string`, optional): `"bearer"` or `"cookie"`.
 - `redacted_display` (`string`, optional): Safe masked visual representation for UI.
 
+### 5.5 `HostRegisterDownloadAuthRequest` & `HostRegisterDownloadAuthResponse`
+
+#### `HostRegisterDownloadAuthRequest`
+```json
+{
+  "kind": "bearer",
+  "token": "guest-session-token"
+}
+```
+- `kind` (`string`, required): Registration kind. Only `"bearer"` is defined; any other value is rejected as `invalid_request`.
+- `token` (`string`, required): Raw bearer token, 1–8192 bytes, valid UTF-8, no CR/LF, and MUST NOT already carry a `Bearer ` scheme prefix (case-insensitive). The token is host-only after this call: it never appears in responses, ABI output, logs, or persisted state other than the materialized `Authorization: Bearer <token>` download header.
+
+#### `HostRegisterDownloadAuthResponse`
+```json
+{
+  "ok": true,
+  "download_auth_ref": "dar-0123456789abcdef0123456789abcdef",
+  "error_code": "",
+  "message": ""
+}
+```
+- `ok` (`bool`, required): Whether registration succeeded.
+- `download_auth_ref` (`string`, optional): Opaque reference `dar-` + 32 lowercase hexadecimal characters, bound to the registering pack identity and current invocation.
+- `error_code` (`string`, optional): `invalid_request` (malformed request, wrong kind, invalid token), `policy_denied` (missing `cap.download.auth` or host policy denial), `budget_exhausted`, `capacity_exceeded` (registry full or per-invocation limit), `response_too_large`. The local CLI additionally emits `not_configured` and `broker_disabled`.
+- `message` (`string`, optional): Error message if `ok` is `false`.
+
+### 5.6 `HostTimeRequest` & `HostTimeResponse`
+
+#### `HostTimeRequest`
+```json
+{}
+```
+The wire shape is exactly the empty object. Any field is rejected as `invalid_request`.
+
+#### `HostTimeResponse`
+```json
+{
+  "ok": true,
+  "unix_secs": 1800000000,
+  "error_code": "",
+  "message": ""
+}
+```
+- `ok` (`bool`, required): Whether the call succeeded.
+- `unix_secs` (`int64`, optional): Invocation-frozen Unix timestamp (seconds since epoch).
+- `error_code` (`string`, optional): `invalid_request`, `budget_exhausted`, `response_too_large`; the local CLI additionally emits `not_configured`.
+- `message` (`string`, optional): Error message if `ok` is `false`.
+
 ---
 
 ## 6. Capability & Security Boundaries
@@ -305,9 +380,12 @@ Packs declare required capabilities in `manifest.json`. The host strictly checks
 - `cap.http.fetch`: Grants permission to invoke `goaria_host.http_fetch` for basic GET/HEAD requests.
 - `cap.http.fetch.extended`: Grants extended fetch features (`POST`, `body_base64`, pack-owned `Authorization`, business `X-*` headers). Requires `cap.http.fetch`; cannot be combined with `auth_profile_ref`. Extended requests must use HTTPS and fail closed on any redirect.
 - `cap.auth.profile`: Grants permission to invoke `goaria_host.auth_profile_status`.
+- `cap.download.auth`: Grants permission to invoke `goaria_host.register_download_auth`. It does not imply broker policy refs and does not unlock `http_fetch`. `goaria_host.host_time` requires no capability.
 
 ### 6.2 Host-Custody Credential Isolation
 Guest extractors MUST NOT receive raw credentials (passwords, private tokens, cookies, auth headers). All credential injection is performed exclusively by the GoAria host runtime when executing downstream download tasks or brokered HTTP requests.
+
+The download-auth channel is the single exception-shaped flow: a pack may *mint* its own credential (e.g. an anonymous session token it obtained itself) and hand it to the host via `goaria_host.register_download_auth`, receiving back only an opaque `download_auth_ref`. The ref — never the token — is the only value that may cross the ABI on `ExtractedItemRef.download_auth_ref`.
 
 ### 6.3 Resource Limits
 Extractors operate within resource boundaries defined in `resource_limits`:
@@ -319,6 +397,16 @@ Extractors operate within resource boundaries defined in `resource_limits`:
 - `max_output_bytes`: Maximum serialized `ExtractOutput` JSON byte size (default and maximum `1048576` bytes).
 
 The production Go/Wazero host enforces the wall-clock deadline with cancellation. Local CLI fuel exhaustion is a deterministic safety approximation for CPU-bound guest code, not an equivalence claim for elapsed time.
+
+### 6.4 Download-Auth Registry Lifecycle
+The host maintains a bounded, in-memory registry of pack-registered credentials:
+
+- **Capacity**: 256 entries host-wide; at most 8 registrations per invocation. Exceeding either limit returns `capacity_exceeded`.
+- **TTL**: Registrations carry a 10-minute absolute TTL. Extension sessions and task submission hold *claims* that keep a bound entry alive until release; unclaimed entries expire.
+- **Invocation binding**: Entries are created under the current invocation and the verified pack identity. On a successful `goaria_extract`, refs referenced by emitted items are retained; unreferenced registrations are purged and zeroed. On failure all registrations of that invocation are purged and zeroed. `goaria_match` never retains registrations.
+- **Output binding**: An item carrying `download_auth_ref` must reference a ref minted during the same invocation by the same pack, and the ref binds to the item's download host. Forged, cross-pack, cross-host, expired, or raw-token values fail extraction.
+- **Materialization**: At task submission the host resolves the ref to its token and emits exactly `Authorization: Bearer <token>` as an ordinary download header. The opaque ref is never persisted; the materialized header may persist as normal task state. Explicit `Authorization`/`Cookie` headers supplied alongside `download_auth_ref` are rejected.
+- **Invalidation**: Runtime snapshot load/reload/remove transitions invalidate the registry; secrets are zeroed on every purge path.
 
 ---
 

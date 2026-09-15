@@ -202,6 +202,8 @@ SDK macros (`#[goaria_extractor]` in Rust, `goaria.exportExtractor` in Zig) auto
 The guest can import host capabilities declared in its manifest:
 1. `goaria_host.http_fetch(req_ptr: i32, req_len: i32) -> i64` (Requires `cap.http.fetch`)
 2. `goaria_host.auth_profile_status(req_ptr: i32, req_len: i32) -> i64` (Requires `cap.auth.profile`)
+3. `goaria_host.register_download_auth(req_ptr: i32, req_len: i32) -> i64` (Requires `cap.download.auth`)
+4. `goaria_host.host_time(req_ptr: i32, req_len: i32) -> i64` (No capability required; request is exactly `{}`; consumes one host-call budget unit per call and returns the invocation-frozen Unix timestamp)
 
 ---
 
@@ -230,6 +232,7 @@ The guest can import host capabilities declared in its manifest:
   - `mime_type: Option<String>` — MIME type (e.g. `image/png`, `video/mp4`).
   - `auth_profile_ref: Option<String>` — If set, instructs the host downloader to attach credentials for this profile when downloading the direct link.
   - `header_profile_ref: Option<String>` — Reserved for custom header profile binding.
+  - `download_auth_ref: Option<String>` — Opaque ref (`dar-` + 32 lowercase hex) returned by `register_download_auth`; binds the item's download to the registered pack credential. Mutually exclusive with `auth_profile_ref`/`header_profile_ref`.
   - `metadata: Option<BTreeMap<String, String>>` — Key-value metadata (never include sensitive tokens).
 
 ---
@@ -251,6 +254,9 @@ pub struct HostHTTPFetchRequest {
     pub auth_profile_ref: Option<String>,    // Host injects credentials if authorized
     pub timeout_millis: Option<i32>,
     pub max_response_bytes: Option<i64>,
+    pub omit_browser_context: Option<bool>,  // Self-authenticated request: suppress browser
+                                           // grants/cookies/User-Agent/Accept-Language/Referer.
+                                           // Forbidden together with auth_profile_ref.
 }
 ```
 
@@ -261,6 +267,8 @@ pub struct HostHTTPFetchRequest {
 - `HostBroker::fetch_url_with_body(url, body, content_type) -> Result<HostHTTPFetchResponse, ExtractorError>`: POST a raw body with a single `Content-Type` header (requires `cap.http.fetch.extended`).
 - `HostBroker::fetch_ref(bpr, ep, params) -> Result<HostHTTPFetchResponse, ExtractorError>`: Shorthand for alias-mode endpoint invocation (refs only — never combine with `url`).
 - `HostBroker::is_auth_available(profile_ref, url) -> Result<bool, ExtractorError>`: Checks if valid user credentials exist for the profile without exposing the secret.
+- `HostBroker::register_download_auth(token) -> Result<String, ExtractorError>`: Registers a pack-minted bearer token (requires `cap.download.auth`); returns the opaque `download_auth_ref` to bind onto emitted items. The token never appears in output.
+- `HostBroker::host_time() -> Result<i64, ExtractorError>`: Invocation-frozen Unix timestamp; consumes one host-call budget unit.
 
 ### High-Level `HostBroker` Methods (Zig)
 - `goaria.HostBroker.fetch(allocator, req) -> !Parsed(HostHTTPFetchResponse)`
@@ -269,6 +277,8 @@ pub struct HostHTTPFetchRequest {
 - `goaria.HostBroker.fetchUrlWithBody(allocator, url, body, content_type) -> !Parsed(HostHTTPFetchResponse)` (requires `cap.http.fetch.extended`)
 - `goaria.HostBroker.fetchRef(allocator, bpr, ep, params) -> !Parsed(HostHTTPFetchResponse)` (refs only — never combine with `url`)
 - `goaria.HostBroker.isAuthAvailable(allocator, profile_ref, url) -> !bool`
+- `goaria.HostBroker.registerDownloadAuth(allocator, token) -> !Parsed(HostRegisterDownloadAuthResponse)` (requires `cap.download.auth`)
+- `goaria.HostBroker.hostTime(allocator) -> !i64`
 
 ---
 
@@ -284,6 +294,7 @@ pub struct HostHTTPFetchRequest {
    - If importing `http_fetch`, manifest must declare `"cap.http.fetch"`.
    - POST/`body_base64`, pack-owned `Authorization`, or business `X-*` headers additionally require `"cap.http.fetch.extended"` (which must be declared alongside `"cap.http.fetch"`); extended fetch must not be combined with `auth_profile_ref`.
    - If querying auth status or binding auth profiles, manifest must declare `"cap.auth.profile"`.
+   - If importing `register_download_auth`, manifest must declare `"cap.download.auth"`. `host_time` requires no capability. `cap.download.auth` does not imply `broker_policy_refs` and does not unlock `http_fetch`.
    - All packs must declare `"cap.parse.wasm"`.
 3. **Resource Limits & Host Ceilings**:
    - `timeout_millis`: 1..=10,000 (Default: 5,000)
@@ -440,15 +451,22 @@ Place mock HTTP response definitions in `fixtures/` inside the pack folder. When
 ]
 ```
 
+Request-side assertions live under `expect` (`method`, `headers`, `body_base64`, `broker_policy_ref`, `endpoint_ref`, `omit_browser_context`); a mismatch fails the run as a `mock_miss`. Run-level assertions use a sibling `assert` object — `{"assert": {"registered_download_auth_refs": 1}}` requires the pack to register exactly that many download-auth refs during a single extract run. The mock `host_time` returns the deterministic constant `1800000000`.
+
 ---
 
 ## 8. Key Developer Invariants & Gotchas
 
 1. **Fail-Closed Principle**:
    - If an unexpected HTTP status code, malformed JSON, or forbidden credential marker (`Authorization:`, `Bearer `) appears, return `ExtractOutput::default()` / `ExtractOutput.empty()`. Never panic and never leak partial unsanitized data.
-2. **Deterministic Output**:
+   - For the download-auth channel this means: missing session token, business error, missing `host_time`, failed `register_download_auth`, or budget exhaustion must all abort extraction — never emit items with a half-configured credential.
+2. **Download-Auth Channel (`cap.download.auth`)**:
+   - Pattern: obtain a session token inside the pack (e.g. an anonymous API token), call `register_download_auth(token)`, then set the returned opaque ref on every emitted item's `download_auth_ref`. The host materializes `Authorization: Bearer <token>` at download time; the token itself never crosses the ABI on output.
+   - Requests that already carry their own auth (e.g. an `Authorization` header minted by the pack) should set `omit_browser_context: Some(true)` so browser grants/cookies cannot interfere; never combine it with `auth_profile_ref`.
+   - Registration limits: 8 refs per invocation, 256 entries host-wide, 10-minute retained TTL — register once per extract and reuse the ref across items.
+3. **Deterministic Output**:
    - `cargo goaria-pack pack` produces deterministic zip archives. Timestamps are normalized and file ordering is sorted.
-3. **No File System or OS Access in Guest**:
+4. **No File System or OS Access in Guest**:
    - WASM target is `wasm32-unknown-unknown` (Rust) or freestanding (Zig). Use standard memory allocators and data structures only.
 4. **Binary Size Optimization**:
    - Always set `opt-level = "z"`, `lto = true`, `strip = true`, and `panic = "abort"` in Rust workspace release profile to keep WASM sizes compact.
