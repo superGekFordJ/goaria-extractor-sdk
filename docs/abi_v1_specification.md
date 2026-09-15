@@ -407,7 +407,7 @@ The host maintains a bounded, in-memory registry of pack-registered credentials:
 - **Output binding**: An item carrying `download_auth_ref` must reference a ref minted during the same invocation by the same pack, and the ref binds to the item's download host. Forged, cross-pack, cross-host, expired, or raw-token values fail extraction.
 - **Materialization**: At task submission the host resolves the ref to its token and emits exactly `Authorization: Bearer <token>` as an ordinary download header. The opaque ref is never persisted; the materialized header may persist as normal task state. Explicit `Authorization`/`Cookie` headers supplied alongside `download_auth_ref` are rejected.
 - **Invalidation**: Runtime snapshot load/reload/remove transitions invalidate the registry; secrets are zeroed on every purge path.
-- **Local CLI scope**: The local `cargo-goaria-pack` runner does not resolve or evaluate alias host policy (`domain_policy_refs` / `broker_policy_refs`), so a CLI run is not a substitute for host-side enforcement. The production host applies the resolved policy when binding refs to emitted item hosts and again at materialization.
+- **Local CLI scope**: The local `cargo-goaria-pack` runner does not resolve or evaluate alias host policy (`domain_policy_refs` / `broker_policy_refs`), so a CLI run is not a substitute for host-side enforcement. The production host constrains credentialed item hosts at binding admission — declared `domains` on legacy manifests, the resolved host output policy on alias manifests — and at materialization re-validates that the requested host belongs to the ref's bound host set.
 
 ---
 
