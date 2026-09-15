@@ -1548,14 +1548,16 @@ impl DownloadAuthRegistry {
     }
 }
 
-const DOWNLOAD_AUTH_TOKEN_MAX_BYTES: usize = 8192;
+/// Mirror of the host token contract: the materialized
+/// "Authorization: Bearer <token>" line must fit the 8192-byte aria2
+/// header-line cap, so the 22-byte prefix is reserved from the token budget.
+const DOWNLOAD_AUTH_TOKEN_MAX_BYTES: usize = 8192 - "Authorization: Bearer ".len();
 
-/// Mirror of the host token contract: 1..=8192 bytes, no CR/LF, and never
-/// already prefixed with a bearer scheme (which would double-prefix the
-/// materialized header).
+/// 1..=8170 bytes, no CR/LF, and never already prefixed with a bearer
+/// scheme (which would double-prefix the materialized header).
 fn validate_download_auth_token(token: &str) -> Result<(), &'static str> {
     if token.is_empty() || token.len() > DOWNLOAD_AUTH_TOKEN_MAX_BYTES {
-        return Err("token length must be between 1 and 8192 bytes");
+        return Err("token length must be between 1 and 8170 bytes");
     }
     if token.contains('\r') || token.contains('\n') {
         return Err("token must not contain CR/LF");
