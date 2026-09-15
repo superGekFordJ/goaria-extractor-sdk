@@ -345,7 +345,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 ```
 - `ok` (`bool`, required): Whether registration succeeded.
 - `download_auth_ref` (`string`, optional): Opaque reference `dar-` + 32 lowercase hexadecimal characters, bound to the registering pack identity and current invocation.
-- `error_code` (`string`, optional): `invalid_request` (malformed request, wrong kind, invalid token), `policy_denied` (missing `cap.download.auth` or host policy denial), `budget_exhausted`, `capacity_exceeded` (registry full or per-invocation limit), `response_too_large`. The local CLI additionally emits `not_configured` and `broker_disabled`.
+- `error_code` (`string`, optional): `invalid_request` (malformed request, wrong kind, invalid token), `policy_denied` (missing `cap.download.auth` or host policy denial), `budget_exhausted`, `registry_full` (registry full or per-invocation limit), `response_too_large`. The local CLI additionally emits `not_configured` and `broker_disabled`.
 - `message` (`string`, optional): Error message if `ok` is `false`.
 
 ### 5.6 `HostTimeRequest` & `HostTimeResponse`
@@ -401,7 +401,7 @@ The production Go/Wazero host enforces the wall-clock deadline with cancellation
 ### 6.4 Download-Auth Registry Lifecycle
 The host maintains a bounded, in-memory registry of pack-registered credentials:
 
-- **Capacity**: 256 entries host-wide; at most 8 registrations per invocation. Exceeding either limit returns `capacity_exceeded`.
+- **Capacity**: 256 entries host-wide; at most 8 registrations per invocation. Exceeding either limit returns `registry_full`.
 - **TTL**: Registrations carry a 10-minute absolute TTL. Extension sessions and task submission hold *claims* that keep a bound entry alive until release; unclaimed entries expire.
 - **Invocation binding**: Entries are created under the current invocation and the verified pack identity. On a successful `goaria_extract`, refs referenced by emitted items are retained; unreferenced registrations are purged and zeroed. On failure all registrations of that invocation are purged and zeroed. `goaria_match` never retains registrations.
 - **Output binding**: An item carrying `download_auth_ref` must reference a ref minted during the same invocation by the same pack, and the ref binds to the item's download host. Forged, cross-pack, cross-host, expired, or raw-token values fail extraction.
