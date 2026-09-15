@@ -59,23 +59,54 @@ fn decode_register_request(
 }
 
 /// Same decode-error contract for the host_time import; the wire shape is an
-/// empty object, so any field decodes as invalid_request.
+/// empty object, so any field decodes as invalid_request. Non-object JSON
+/// (null, arrays, scalars) is rejected up front because an empty struct
+/// would otherwise accept some of it.
 fn decode_time_request(req_bytes: &[u8]) -> Result<HostTimeRequest, HostTimeResponse> {
-    serde_json::from_slice(req_bytes).map_err(|error| HostTimeResponse {
+    let invalid = |message: String| HostTimeResponse {
         ok: false,
         error_code: Some("invalid_request".to_string()),
-        message: Some(error.to_string()),
+        message: Some(message),
         ..Default::default()
-    })
+    };
+    match req_bytes.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        Some(b'{') => {}
+        _ => return Err(invalid("request must be an empty object".to_string())),
+    }
+    serde_json::from_slice(req_bytes).map_err(|error| invalid(error.to_string()))
 }
 
-/// Strip the entire query from a URL for debug output: query keys and values
-/// may carry secrets and must never reach stderr. A `?<redacted>` marker is
-/// appended when a query existed.
+/// Strip userinfo, query, and fragment from a URL for debug output: all
+/// three may carry secrets and must never reach stderr. `<redacted>`
+/// markers record which components were removed.
 fn redact_url_for_debug(url: &str) -> String {
-    match url.find('?') {
-        Some(index) => format!("{}?<redacted>", &url[..index]),
-        None => url.to_string(),
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        let had_query = parsed.query().is_some();
+        let had_fragment = parsed.fragment().is_some();
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        let mut out = parsed.to_string();
+        if had_query {
+            out.push_str("?<redacted>");
+        }
+        if had_fragment {
+            out.push_str("#<redacted>");
+        }
+        return out;
+    }
+
+    // Unparsable input: keep scheme + authority with userinfo removed and
+    // drop everything from the first '?' or '#'.
+    let cut = url.find(['?', '#']).unwrap_or(url.len());
+    let prefix = &url[..cut];
+    match prefix.split_once("://") {
+        Some((scheme, authority)) => {
+            let host = authority.rsplit('@').next().unwrap_or_default();
+            format!("{scheme}://{host}<redacted>")
+        }
+        None => "<redacted>".to_string(),
     }
 }
 
@@ -409,8 +440,10 @@ impl WasmEngine {
                     }
                 };
 
-                if std::env::var_os("GOARIA_PACK_DEBUG").is_some() {
-                    eprintln!("[register_download_auth] kind={}", req.kind);
+                // Never echo the pack-controlled kind value; only the one
+                // valid constant is worth logging.
+                if std::env::var_os("GOARIA_PACK_DEBUG").is_some() && req.kind == "bearer" {
+                    eprintln!("[register_download_auth] kind=bearer");
                 }
                 let data = caller.data_mut();
                 let resp = data.broker.handle_register_download_auth(
@@ -580,10 +613,23 @@ mod tests {
         let err = decode_time_request(br#"{"at":1}"#).unwrap_err();
         assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
         assert!(decode_time_request(b"{}").is_ok());
+        // non-object payloads must not slide into the empty struct
+        for bad in [
+            &b"null"[..],
+            b"[]",
+            b"[{}]",
+            b"5",
+            br#""now""#,
+            b"",
+        ] {
+            let err = decode_time_request(bad).unwrap_err();
+            assert!(!err.ok);
+            assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
+        }
     }
 
     #[test]
-    fn debug_url_redaction_strips_the_entire_query() {
+    fn debug_url_redaction_strips_secret_carrying_components() {
         assert_eq!(
             redact_url_for_debug("https://example.com/path"),
             "https://example.com/path"
@@ -591,13 +637,18 @@ mod tests {
         let redacted = redact_url_for_debug(
             "https://example.com/path?token=secret123&other=value#frag",
         );
-        assert_eq!(redacted, "https://example.com/path?<redacted>");
+        assert_eq!(redacted, "https://example.com/path?<redacted>#<redacted>");
         assert!(!redacted.contains("secret123"));
         assert!(!redacted.contains("other"));
         assert!(!redacted.contains("token"));
-        // fragment stays part of the stripped tail? '?' truncation drops it too
+
+        // userinfo and bare fragments are stripped as well
+        let credentialed = redact_url_for_debug("https://user:pass@example.com/file");
+        assert!(!credentialed.contains("user"));
+        assert!(!credentialed.contains("pass"));
         let bare_fragment = redact_url_for_debug("https://example.com/p#frag");
-        assert_eq!(bare_fragment, "https://example.com/p#frag");
+        assert_eq!(bare_fragment, "https://example.com/p#<redacted>");
+        assert!(!bare_fragment.contains("frag"));
     }
 
     #[test]

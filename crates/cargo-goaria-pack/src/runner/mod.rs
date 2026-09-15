@@ -370,6 +370,24 @@ fn validate_extract_output(
             })?;
         }
 
+        // Credential-bearing items are https-only, mirroring the host's
+        // fail-closed rule for materialized auth headers.
+        let has_credential_ref = item.download_auth_ref.is_some()
+            || item.auth_profile_ref.is_some()
+            || item.header_profile_ref.is_some();
+        if has_credential_ref {
+            let scheme = item
+                .url
+                .as_deref()
+                .and_then(|url| url::Url::parse(url).ok())
+                .map(|parsed| parsed.scheme().to_string());
+            if scheme.as_deref() != Some("https") {
+                return Err(validation_error(format!(
+                    "extract output item {index}: item url must use https for credentialed downloads"
+                )));
+            }
+        }
+
         for (name, value) in [
             ("id", item.id.as_deref()),
             ("filename", item.filename.as_deref()),
@@ -396,6 +414,12 @@ fn validate_extract_output(
                     "extract output item {index}: download_auth_ref must be dar- plus 32 lowercase hex characters"
                 )));
             }
+            if item.auth_profile_ref.is_some() || item.header_profile_ref.is_some() {
+                return Err(validation_error(format!(
+                    "extract output item {index}: download_auth_ref must not combine with auth_profile_ref or header_profile_ref"
+                )));
+            }
+            validate_download_auth_item_host(item.url.as_deref().unwrap_or_default(), index)?;
             if download_auth.is_registered_token(reference) {
                 return Err(validation_error(format!(
                     "extract output item {index}: download_auth_ref must be an opaque ref, not a registered token"
@@ -443,6 +467,50 @@ fn validate_extract_output(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Mirror of the host's ParseHTTPURLHost admission for download-auth item
+/// URLs: no IP literals, trailing dots, single-label or otherwise invalid
+/// domain hosts. `validate_abi_url` already covers userinfo, escapes, and
+/// port shape.
+fn validate_download_auth_item_host(raw_url: &str, index: usize) -> Result<(), RunnerError> {
+    let unsafe_host = || {
+        validation_error(format!(
+            "extract output item {index}: item url has an unsafe or unsupported host"
+        ))
+    };
+    let authority = raw_url
+        .split_once("://")
+        .map(|(_, remainder)| remainder.split(['/', '?', '#']).next().unwrap_or_default())
+        .unwrap_or_default();
+    if !authority.is_ascii() {
+        return Err(unsafe_host());
+    }
+    let parsed = url::Url::parse(raw_url).map_err(|_| unsafe_host())?;
+    let host = parsed.host_str().ok_or_else(unsafe_host)?;
+    if host != host.trim() || host.ends_with('.') || host.contains('%') {
+        return Err(unsafe_host());
+    }
+    let ip_candidate = host.trim_matches(|c| c == '[' || c == ']');
+    if ip_candidate.parse::<std::net::IpAddr>().is_ok() {
+        return Err(unsafe_host());
+    }
+    let host = host.to_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let valid = labels.len() >= 2
+        && labels.iter().all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        });
+    if !valid {
+        return Err(unsafe_host());
     }
     Ok(())
 }
@@ -728,5 +796,118 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_extract_output(&ExtractOutput::single(echoed), &registry).is_err());
+    }
+
+    #[test]
+    fn credentialed_items_require_https_and_exclude_profile_refs() {
+        use crate::manifest::{Capability, Manifest, ResourceLimits, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::host_broker::{HostBroker, MockBroker};
+        use crate::runner::limits::HostCallBudget;
+        use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
+
+        let mut registry = DownloadAuthRegistry::default();
+        let manifest = Manifest {
+            pack_id: "test-pack".to_string(),
+            pack_version: "0.1.0".to_string(),
+            abi_version: 1,
+            description: None,
+            capabilities: vec![Capability(CAPABILITY_DOWNLOAD_AUTH.to_string())],
+            domains: Some(vec![]),
+            domain_policy_refs: None,
+            broker_policy_refs: None,
+            resource_limits: ResourceLimits::default(),
+            payload_sha256: None,
+        };
+        let broker = HostBroker::Mock(MockBroker::new());
+        let mut budget = HostCallBudget::new(4);
+        let minted = broker
+            .handle_register_download_auth(
+                &manifest,
+                &mut budget,
+                HostRegisterDownloadAuthRequest {
+                    kind: "bearer".to_string(),
+                    token: "raw-token".to_string(),
+                },
+                &mut registry,
+            )
+            .download_auth_ref
+            .unwrap();
+
+        // download_auth_ref cannot combine with profile refs (host mirror).
+        for extra in [
+            ExtractedItemRef {
+                auth_profile_ref: Some("apr-x".to_string()),
+                ..Default::default()
+            },
+            ExtractedItemRef {
+                header_profile_ref: Some("hpr-x".to_string()),
+                ..Default::default()
+            },
+        ] {
+            let mut item = extra;
+            item.url = Some("https://example.com/file".to_string());
+            item.download_auth_ref = Some(minted.clone());
+            assert!(
+                validate_extract_output(&ExtractOutput::single(item), &registry).is_err(),
+                "profile ref combination must fail"
+            );
+        }
+
+        // Any credential ref on a plaintext URL fails closed.
+        for (url, auth_ref, header_ref) in [
+            ("http://example.com/file", None, None),
+            ("ftp://example.com/file", None, None),
+        ] {
+            let item = ExtractedItemRef {
+                url: Some(url.to_string()),
+                download_auth_ref: Some(minted.clone()),
+                auth_profile_ref: auth_ref.map(str::to_string),
+                header_profile_ref: header_ref.map(str::to_string),
+                ..Default::default()
+            };
+            assert!(
+                validate_extract_output(&ExtractOutput::single(item), &registry).is_err(),
+                "url {url} must fail"
+            );
+        }
+        let profile_http = ExtractedItemRef {
+            url: Some("http://example.com/file".to_string()),
+            auth_profile_ref: Some("apr-x".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(profile_http), &registry).is_err());
+        let header_http = ExtractedItemRef {
+            url: Some("http://example.com/file".to_string()),
+            header_profile_ref: Some("hpr-x".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(header_http), &registry).is_err());
+
+        // Unsafe host shapes the host's bind admission rejects.
+        for url in [
+            "https://127.0.0.1/file",
+            "https://[::1]/file",
+            "https://localhost/file",
+            "https://example.com./file",
+            "https://user:pass@example.com/file",
+            "https://exa_mple.com/file",
+        ] {
+            let item = ExtractedItemRef {
+                url: Some(url.to_string()),
+                download_auth_ref: Some(minted.clone()),
+                ..Default::default()
+            };
+            assert!(
+                validate_extract_output(&ExtractOutput::single(item), &registry).is_err(),
+                "url {url} must fail"
+            );
+        }
+
+        // A plain http item without credential refs is still allowed.
+        let plain = ExtractedItemRef {
+            url: Some("http://example.com/file".to_string()),
+            ..Default::default()
+        };
+        assert!(validate_extract_output(&ExtractOutput::single(plain), &registry).is_ok());
     }
 }

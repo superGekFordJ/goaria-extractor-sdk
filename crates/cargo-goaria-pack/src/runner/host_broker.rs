@@ -1512,12 +1512,23 @@ pub struct DownloadAuthRegistry {
     entries: BTreeMap<String, String>,
 }
 
+/// Host-mirrored limits: at most 8 registrations per invocation and 256
+/// entries registry-wide. The run-local registry is invocation-scoped, so
+/// its entry count is also the per-invocation count.
+const DOWNLOAD_AUTH_MAX_PER_INVOCATION: usize = 8;
+const DOWNLOAD_AUTH_REGISTRY_CAPACITY: usize = 256;
+
 impl DownloadAuthRegistry {
-    fn register(&mut self, token: &str) -> String {
+    fn register(&mut self, token: &str) -> Result<String, &'static str> {
+        if self.entries.len() >= DOWNLOAD_AUTH_MAX_PER_INVOCATION
+            || self.entries.len() >= DOWNLOAD_AUTH_REGISTRY_CAPACITY
+        {
+            return Err("download auth registry is full");
+        }
         self.counter += 1;
         let reference = format!("dar-{:032x}", self.counter);
         self.entries.insert(reference.clone(), token.to_string());
-        reference
+        Ok(reference)
     }
 
     /// True when `reference` was minted during this run.
@@ -1752,16 +1763,25 @@ impl HostBroker {
             };
         }
 
-        HostRegisterDownloadAuthResponse {
-            ok: true,
-            download_auth_ref: Some(registry.register(&req.token)),
-            ..Default::default()
+        match registry.register(&req.token) {
+            Ok(reference) => HostRegisterDownloadAuthResponse {
+                ok: true,
+                download_auth_ref: Some(reference),
+                ..Default::default()
+            },
+            Err(message) => HostRegisterDownloadAuthResponse {
+                ok: false,
+                error_code: Some("registry_full".to_string()),
+                message: Some(message.to_string()),
+                ..Default::default()
+            },
         }
     }
 
     /// Handle goaria_host.host_time: one budget unit per call, same frozen
     /// snapshot for the whole run. Mock serves the deterministic constant;
-    /// Live serves the invocation snapshot captured at run start.
+    /// every other mode serves the invocation snapshot — host_time needs
+    /// no broker, so a Disabled broker still answers.
     pub fn handle_host_time(
         &self,
         budget: &mut HostCallBudget,
@@ -1781,15 +1801,9 @@ impl HostBroker {
                 unix_secs: Some(MOCK_HOST_TIME_SECS),
                 ..Default::default()
             },
-            Self::Live(_) => HostTimeResponse {
+            Self::Live(_) | Self::Disabled => HostTimeResponse {
                 ok: true,
                 unix_secs: Some(snapshot_secs),
-                ..Default::default()
-            },
-            Self::Disabled => HostTimeResponse {
-                ok: false,
-                error_code: Some("not_configured".to_string()),
-                message: Some("host time is not configured".to_string()),
                 ..Default::default()
             },
         }
@@ -2441,6 +2455,47 @@ mod tests {
     }
 
     #[test]
+    fn register_download_auth_enforces_per_invocation_limit() {
+        use super::{DownloadAuthRegistry, HostBroker};
+        use crate::manifest::{Capability, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::limits::HostCallBudget;
+        use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
+
+        let mut manifest = manifest_with_domains(&["example.com"]);
+        manifest
+            .capabilities
+            .push(Capability(CAPABILITY_DOWNLOAD_AUTH.to_string()));
+        let broker = HostBroker::Mock(MockBroker::new());
+        let mut registry = DownloadAuthRegistry::default();
+        let mut budget = HostCallBudget::new(16);
+
+        for i in 0..super::DOWNLOAD_AUTH_MAX_PER_INVOCATION {
+            let resp = broker.handle_register_download_auth(
+                &manifest,
+                &mut budget,
+                HostRegisterDownloadAuthRequest {
+                    kind: "bearer".to_string(),
+                    token: format!("token-{i}"),
+                },
+                &mut registry,
+            );
+            assert!(resp.ok, "registration {i} denied: {:?}", resp);
+        }
+        let resp = broker.handle_register_download_auth(
+            &manifest,
+            &mut budget,
+            HostRegisterDownloadAuthRequest {
+                kind: "bearer".to_string(),
+                token: "token-overflow".to_string(),
+            },
+            &mut registry,
+        );
+        assert!(!resp.ok);
+        assert_eq!(resp.error_code.as_deref(), Some("registry_full"));
+        assert_eq!(registry.registered_refs().len(), super::DOWNLOAD_AUTH_MAX_PER_INVOCATION);
+    }
+
+    #[test]
     fn register_download_auth_enforces_kind_token_capability_and_budget() {
         use super::{DownloadAuthRegistry, HostBroker};
         use crate::manifest::{Capability, CAPABILITY_DOWNLOAD_AUTH};
@@ -2517,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn host_time_serves_mock_constant_and_live_snapshot() {
+    fn host_time_serves_mock_constant_and_snapshot_without_broker() {
         use super::{HostBroker, MOCK_HOST_TIME_SECS};
         use crate::runner::limits::HostCallBudget;
 
@@ -2532,8 +2587,11 @@ mod tests {
         assert!(resp.ok);
         assert_eq!(resp.unix_secs, Some(12345));
 
+        // host_time needs no broker: a disabled broker still serves the
+        // invocation snapshot rather than an out-of-vocabulary error.
         let resp = HostBroker::Disabled.handle_host_time(&mut budget, 12345);
-        assert_eq!(resp.error_code.as_deref(), Some("not_configured"));
+        assert!(resp.ok);
+        assert_eq!(resp.unix_secs, Some(12345));
 
         // each call consumed one budget unit; the next is exhausted
         let resp = mock.handle_host_time(&mut budget, 12345);
