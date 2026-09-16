@@ -10,7 +10,7 @@ use cargo_goaria_pack::commands::pack::handle_pack;
 use cargo_goaria_pack::commands::test::{handle_test, TestCommandError};
 use cargo_goaria_pack::manifest::Manifest;
 use cargo_goaria_pack::pack::lock::{LockEntry, LockFile, LOCK_SCHEMA_VERSION};
-use cargo_goaria_pack::scaffold::{scaffold_project, validate_pack_name, ScaffoldError};
+use cargo_goaria_pack::scaffold::{scaffold_project, validate_pack_name, ScaffoldError, SdkSpec};
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -51,7 +51,12 @@ fn test_scaffold_rust_project() {
     let temp = tempfile::tempdir().unwrap();
     let project_dir = temp.path().join("my_rust_pack");
 
-    let res = scaffold_project("my_rust_pack", Language::Rust, &project_dir);
+    let res = scaffold_project(
+        "my_rust_pack",
+        Language::Rust,
+        &project_dir,
+        &SdkSpec::Vendor,
+    );
     assert!(res.is_ok());
 
     assert!(project_dir.join("Cargo.toml").exists());
@@ -72,7 +77,7 @@ fn test_scaffold_zig_project() {
     let temp = tempfile::tempdir().unwrap();
     let project_dir = temp.path().join("my_zig_pack");
 
-    let res = scaffold_project("my-zig-pack", Language::Zig, &project_dir);
+    let res = scaffold_project("my-zig-pack", Language::Zig, &project_dir, &SdkSpec::Vendor);
     assert!(res.is_ok());
 
     assert!(project_dir.join("build.zig").exists());

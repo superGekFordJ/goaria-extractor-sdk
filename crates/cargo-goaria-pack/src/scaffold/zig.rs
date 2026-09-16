@@ -1,45 +1,98 @@
-use crate::scaffold::ScaffoldError;
+use crate::scaffold::sdk_assets::{
+    zig_fingerprint, zig_package_name, zig_struct_name, ZIG_SDK_FILES,
+};
+use crate::scaffold::{copy_dir_recursive, ScaffoldError, SdkSpec};
 use std::path::Path;
 
-pub fn generate(name: &str, target_dir: &Path) -> Result<(), ScaffoldError> {
+fn write_zig_sdk(target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> {
+    let vendor_dir = target_dir.join("vendor").join("goaria_sdk");
+    match sdk {
+        SdkSpec::Vendor => {
+            for file in ZIG_SDK_FILES {
+                let dest = vendor_dir.join(file.rel_path);
+                if let Some(parent) = dest.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&dest, file.contents)?;
+            }
+            Ok(())
+        }
+        SdkSpec::Path(dir) => copy_dir_recursive(dir, &vendor_dir),
+        other => Err(ScaffoldError::UnsupportedSdkSource {
+            sdk: match other {
+                SdkSpec::Git { .. } => "git",
+                SdkSpec::Crates => "crates",
+                _ => "unknown",
+            }
+            .to_string(),
+            lang: "zig".to_string(),
+            reason: "zig packs require vendored or local-path SDK sources".to_string(),
+        }),
+    }
+}
+
+pub fn generate(name: &str, target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> {
     let src_dir = target_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
-    let build_zig = r#"const std = @import("std");
+    let artifact_name = name.replace('-', "_");
+    let zon_name = zig_package_name(name);
+    let fingerprint = zig_fingerprint(&zon_name);
+    let struct_name = format!("{}Extractor", zig_struct_name(name));
 
-pub fn build(b: *std.Build) void {
-    const target = b.resolveTargetQuery(.{
+    let build_zig = format!(
+        r#"const std = @import("std");
+
+pub fn build(b: *std.Build) void {{
+    const target = b.resolveTargetQuery(.{{
         .cpu_arch = .wasm32,
         .os_tag = .freestanding,
-    });
-
-    const optimize = b.standardOptimizeOption(.{
+    }});
+    const optimize = b.standardOptimizeOption(.{{
         .preferred_optimize_mode = .ReleaseSmall,
-    });
+    }});
 
-    const lib = b.addSharedLibrary(.{
-        .name = "payload",
-        .root_source_file = b.path("src/main.zig"),
+    const sdk_dep = b.dependency("goaria_sdk", .{{
         .target = target,
         .optimize = optimize,
-    });
+    }});
+    const sdk_mod = sdk_dep.module("goaria_sdk");
 
-    lib.rdynamic = true;
-    lib.entry = .disabled;
+    const wasm = b.addExecutable(.{{
+        .name = "{artifact_name}",
+        .root_module = b.createModule(.{{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = true,
+            .imports = &.{{ .{{ .name = "goaria_sdk", .module = sdk_mod }} }},
+        }}),
+    }});
 
-    b.installArtifact(lib);
-}
-"#;
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+
+    b.installArtifact(wasm);
+}}
+"#
+    );
     std::fs::write(target_dir.join("build.zig"), build_zig)?;
 
     let build_zig_zon = format!(
         r#".{{
-    .name = "{name}",
+    .name = .{zon_name},
     .version = "0.1.0",
-    .dependencies = .{{}},
+    .fingerprint = 0x{fingerprint:016x},
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{{
+        .goaria_sdk = .{{
+            .path = "vendor/goaria_sdk",
+        }},
+    }},
     .paths = .{{
         "build.zig",
         "build.zig.zon",
+        "manifest.json",
         "src",
     }},
 }}
@@ -76,50 +129,43 @@ pub fn build(b: *std.Build) void {
     );
     std::fs::write(target_dir.join("manifest.json"), manifest_json)?;
 
-    let main_zig = r#"const std = @import("std");
+    let main_zig = format!(
+        r#"const std = @import("std");
+const goaria = @import("goaria_sdk");
 
-var allocator = std.heap.page_allocator;
+pub const {struct_name} = struct {{
+    pub fn matchUrl(allocator: std.mem.Allocator, input: goaria.MatchInput) !goaria.MatchOutput {{
+        _ = allocator;
+        if (std.mem.indexOf(u8, input.url, "fixture.invalid") != null) {{
+            return goaria.MatchOutput.matchedResult()
+                .withConfidence(100)
+                .withReason("matches fixture.invalid domain");
+        }}
+        return goaria.MatchOutput.unmatchedResult();
+    }}
 
-inline fn packResult(ptr: u32, len: u32) i64 {
-    const val = (@as(u64, ptr) << 32) | @as(u64, len);
-    return @bitCast(val);
-}
+    pub fn extract(allocator: std.mem.Allocator, input: goaria.ExtractInput) !goaria.ExtractOutput {{
+        if (std.mem.indexOf(u8, input.url, "fixture.invalid") == null) {{
+            return goaria.ExtractOutput.empty();
+        }}
 
-export fn goaria_abi_version() callconv(.c) i32 {
-    return 1;
-}
+        const item = goaria.ExtractedItemRef{{
+            .id = "item-001",
+            .url = input.url,
+            .filename = "download.bin",
+            .size_bytes = null,
+            .mime_type = "application/octet-stream",
+        }};
 
-export fn goaria_alloc(len: i32) callconv(.c) i32 {
-    if (len <= 0) return 0;
-    const slice = allocator.alloc(u8, @intCast(len)) catch return 0;
-    return @intCast(@intFromPtr(slice.ptr));
-}
+        return try goaria.ExtractOutput.single(allocator, item);
+    }}
+}};
 
-export fn goaria_free(ptr: i32, len: i32) callconv(.c) void {
-    if (ptr <= 0 or len <= 0) return;
-    const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
-    const slice: []u8 = @as([*]u8, @ptrFromInt(u_ptr))[0..@as(usize, @as(u32, @bitCast(len)))];
-    allocator.free(slice);
-}
-
-export fn goaria_match(ptr: i32, len: i32) callconv(.c) i64 {
-    _ = ptr;
-    _ = len;
-    const result = "{\"matched\":true,\"confidence\":100,\"reason\":\"matches fixture domain\"}";
-    const out_slice = allocator.alloc(u8, result.len) catch return 0;
-    @memcpy(out_slice, result);
-    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
-}
-
-export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
-    _ = ptr;
-    _ = len;
-    const result = "{\"items\":[{\"id\":\"item-001\",\"url\":\"https://fixture.invalid/file.bin\",\"filename\":\"file.bin\"}]}";
-    const out_slice = allocator.alloc(u8, result.len) catch return 0;
-    @memcpy(out_slice, result);
-    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
-}
-"#;
+comptime {{
+    goaria.exportExtractor({struct_name});
+}}
+"#
+    );
     std::fs::write(src_dir.join("main.zig"), main_zig)?;
 
     let gitignore = r#".zig-cache/
@@ -129,6 +175,8 @@ dist/
 *.lock.json
 "#;
     std::fs::write(target_dir.join(".gitignore"), gitignore)?;
+
+    write_zig_sdk(target_dir, sdk)?;
 
     Ok(())
 }

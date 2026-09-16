@@ -16,6 +16,23 @@ impl std::fmt::Display for Language {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SdkSource {
+    Vendor,
+    Git,
+    Crates,
+}
+
+impl std::fmt::Display for SdkSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SdkSource::Vendor => write!(f, "vendor"),
+            SdkSource::Git => write!(f, "git"),
+            SdkSource::Crates => write!(f, "crates"),
+        }
+    }
+}
+
 /// GoAria Extractor Pack SDK Toolchain & CLI
 #[derive(Parser, Debug)]
 #[command(
@@ -59,6 +76,20 @@ pub struct NewArgs {
     /// Implementation language ('rust' or 'zig')
     #[arg(short, long, value_enum, default_value_t = Language::Rust)]
     pub lang: Language,
+
+    /// SDK dependency source: 'vendor' embeds SDK sources into the project (default),
+    /// 'git' depends on the GitHub repo, 'crates' uses the crates.io version
+    #[arg(long, value_enum, value_name = "SOURCE")]
+    pub sdk: Option<SdkSource>,
+
+    /// Git revision (commit SHA, tag, or branch) for '--sdk git'
+    #[arg(long, value_name = "REF")]
+    pub sdk_ref: Option<String>,
+
+    /// Path to a local goaria SDK package directory (overrides --sdk;
+    /// rust: dir containing the SDK Cargo.toml; zig: dir containing sdk/zig's build.zig.zon)
+    #[arg(long, value_name = "DIR")]
+    pub sdk_path: Option<PathBuf>,
 
     /// Target directory for project generation (defaults to ./<name>)
     #[arg(short, long, value_name = "PATH")]

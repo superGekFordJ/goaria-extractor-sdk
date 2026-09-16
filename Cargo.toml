@@ -32,6 +32,7 @@ hex = "0.4"
 rand = "0.8"
 zip = { version = "2.2", default-features = false }
 colored = "2.1"
+crc32fast = "1.4"
 
 [profile.release]
 opt-level = "z"
