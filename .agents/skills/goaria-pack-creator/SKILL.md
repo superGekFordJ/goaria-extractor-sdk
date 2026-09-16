@@ -247,7 +247,7 @@ The guest can import host capabilities declared in its manifest:
 
 ## 4. HostBroker Mechanics & Network Calling
 
-The `HostBroker` client is the guest's interface to host networking. Guests **do not possess raw sockets**; all network requests pass through the HostBroker for capability checks, TLS fingerprinting, rate limiting, and credential injection.
+The `HostBroker` client is the guest's interface to host networking. Guests **do not possess raw sockets**; all network requests pass through the HostBroker for capability checks, domain/SSRF egress policy enforcement, and credential injection.
 
 ### Request Payload (`HostHTTPFetchRequest`)
 ```rust
@@ -297,7 +297,7 @@ pub struct HostHTTPFetchRequest {
 ### Strict Validation Rules
 1. **Mode Isolation (Never Mix!)**:
    - **Concrete Domain Mode**: `domains` is non-empty (`[{"host": "example.com", "include_subdomains": true}]`). `domain_policy_refs` and `broker_policy_refs` MUST be omitted or null.
-   - **Alias Policy Ref Mode**: `domains` MUST be an explicit empty array `[]`. `domain_policy_refs` and `broker_policy_refs` MUST be non-empty arrays.
+   - **Alias Policy Ref Mode**: `domains` MUST be an explicit empty array `[]`. `domain_policy_refs` MUST be a non-empty array. `broker_policy_refs` MUST be non-empty if the manifest declares `cap.http.fetch`, `cap.http.fetch.extended`, or `cap.auth.profile`, and MUST be omitted/empty otherwise (broker refs require an http or auth capability).
 2. **Capability Matching**:
    - If importing `http_fetch`, manifest must declare `"cap.http.fetch"`.
    - POST/`body_base64`, pack-owned `Authorization`, or business `X-*` headers additionally require `"cap.http.fetch.extended"` (which must be declared alongside `"cap.http.fetch"`); extended fetch must not be combined with `auth_profile_ref`.
@@ -307,9 +307,9 @@ pub struct HostHTTPFetchRequest {
 3. **Resource Limits & Host Ceilings**:
    - `timeout_millis`: 1..=10,000 (Default: 5,000)
    - `max_memory_pages`: 1..=256 pages = 16MB (Default: 32 pages = 2MB)
-   - `max_host_calls`: 1..=128 calls per run (Default: 10~50)
+   - `max_host_calls`: 1..=128 calls per run (Default: 50)
    - `max_response_bytes`: Up to 10MB (Default: 1MB = 1,048,576 bytes)
-   - `max_output_items`: Up to 1,000 items (Default: 50~100)
+   - `max_output_items`: Up to 1,000 items (Default: 50)
    - `max_output_bytes`: Up to 1MB (Default: 1MB)
 
 ---
@@ -459,7 +459,7 @@ Place mock HTTP response definitions in `fixtures/` inside the pack folder. When
 ]
 ```
 
-Request-side assertions live under `expect` (`method`, `headers`, `body_base64`, `broker_policy_ref`, `endpoint_ref`, `omit_browser_context`); a mismatch fails the run as a `mock_miss`. Run-level assertions use a sibling `assert` object — `{"assert": {"registered_download_auth_refs": 1}}` requires the pack to register exactly that many download-auth refs during a single extract run. The mock `host_time` returns the deterministic constant `1800000000`.
+Request-side assertions live under `expect` (`method`, `headers`, `body_base64`, `broker_policy_ref`, `endpoint_ref`, `omit_browser_context`); a mismatch fails the run as `no_mock_match`. Run-level assertions use a sibling `assert` object — `{"assert": {"registered_download_auth_refs": 1}}` requires the pack to register exactly that many download-auth refs during a single extract run. The mock `host_time` returns the deterministic constant `1800000000`.
 
 ---
 

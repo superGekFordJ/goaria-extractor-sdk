@@ -134,7 +134,7 @@ int64_t goaria_extract(int32_t ptr, int32_t len);
 
 ## 4. Host Imported Syscalls (`"goaria_host"`)
 
-Modules declaring required capabilities may import broker syscalls from the `"goaria_host"` module namespace:
+Modules declaring required capabilities may import broker syscalls from the `"goaria_host"` module namespace. Every import takes a guest-owned request buffer (`ptr`, `len`) that the host reads during the call and does not retain, and returns a packed 64-bit handle (`ptr << 32 | len`) to a response buffer the host allocates inside the guest via `goaria_alloc`. The guest owns each returned buffer and MUST release it with `goaria_free(ptr, len)` — the Rust SDK wraps it in `GuestBuffer`, which frees on drop. A `0` return indicates a transport-level failure (no response was written).
 
 ### 4.1 `goaria_host.http_fetch`
 ```c
@@ -206,7 +206,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 }
 ```
 - `matched` (`bool`, required): Whether the URL is supported.
-- `confidence` (`uint8`, optional, 0–100): Match confidence level (default `100` if omitted and matched).
+- `confidence` (`uint8`, optional, 0–100): Match confidence level; an omitted field decodes as `0`. The Rust SDK's `MatchOutput::matched()` helper sets `100` — emitting `100` for a confident match is an SDK convention, not a wire default.
 - `reason` (`string`, optional): Human-readable explanation.
 
 ### 5.2 `ExtractInput` & `ExtractOutput`
@@ -268,7 +268,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `url` (`string`, optional): Raw-mode target URL. Mutually exclusive with `broker_policy_ref`/`endpoint_ref`/`params`; a request uses exactly one mode.
 - `broker_policy_ref`, `endpoint_ref` (`string`, optional): Ref-mode opaque references; only valid as a pair under an alias (policy-ref) manifest.
 - `params` (`map[string]string`, optional): Ref-mode parameters.
-- `headers` (`map[string]string`, optional): Request headers. Safe names pass with `cap.http.fetch`; pack-owned `Authorization` and business `X-*` names additionally require `cap.http.fetch.extended`. Forbidden names (e.g. `Cookie`, `Host`, `Content-Length`) are always rejected.
+- `headers` (`map[string]string`, optional): Request headers. Under `cap.http.fetch` only the safe names `Accept`, `Accept-Language`, `Content-Type`, `Referer`, and `User-Agent` pass; pack-owned `Authorization` and business `X-*` names additionally require `cap.http.fetch.extended`. `Cookie`, `Set-Cookie`, `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, and `Proxy-Authorization` are always rejected. At most 16 headers; each value at most 1024 bytes.
 - `body_base64` (`string`, optional): Strict padded standard Base64 request body, decoded cap 16 KiB. Requires `method: "POST"` and exactly one `Content-Type` of `application/json` or `application/x-www-form-urlencoded`.
 - `auth_profile_ref` (`string`, optional): Host auth profile reference. Mutually exclusive with extended fetch features.
 - `omit_browser_context` (`bool`, optional): When `true`, the request is treated as self-authenticated: the host suppresses all browser-owned context (browser credential grants, cookies, `User-Agent`, `Accept-Language`, `Referer`) for this request. Mutually exclusive with `auth_profile_ref` — combining them is rejected as `invalid_request`.
@@ -293,7 +293,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `final_url` (`string`, optional): URL after redirects. Secret-shaped values are redacted before exposure.
 - `headers` (`map[string][]string`, optional): Response headers, restricted to the safe allowlist (`Content-Length`, `Content-Type`, `Etag`, `Last-Modified`) under canonical `Title-Case` names, with secret-shaped values redacted.
 - `body_base64` (`string`, optional): Base64-encoded response payload bytes.
-- `error_code` (`string`, optional): Error identifier if `ok` is `false`. Host categories: `invalid_request` (malformed request shape), `policy_denied` (capability/policy gate), `fetch_failed` / `authenticated_fetch_failed` (broker-layer failures; static messages), `budget_exhausted` (host-call budget), `response_too_large` (the serialized host-import response exceeded its wire cap — the payload carries only `ok`/`error_code`/`message`). The local CLI additionally emits `no_mock_match`, `broker_disabled`, and `ref_mode_not_supported_in_live_runner`.
+- `error_code` (`string`, optional): Error identifier if `ok` is `false`. Host categories: `invalid_request` (malformed request shape), `policy_denied` (capability/policy gate), `fetch_failed` / `authenticated_fetch_failed` (broker-layer failures; static messages), `budget_exhausted` (host-call budget), `not_configured` (http broker not wired on the host), `response_too_large` (the serialized host-import response exceeded its wire cap — the payload carries only `ok`/`error_code`/`message`), `internal_error` (host failed to encode the response; wire-level fallback). The local CLI additionally emits `no_mock_match`, `broker_disabled`, and `ref_mode_not_supported_in_live_runner`.
 - `message` (`string`, optional): Error message if `ok` is `false`.
 
 ### 5.4 `HostAuthProfileStatusRequest` & `HostAuthProfileStatusResponse`
@@ -321,6 +321,8 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 - `available` (`bool`, optional): True if credentials exist in host custody.
 - `kind` (`string`, optional): `"bearer"` or `"cookie"`.
 - `redacted_display` (`string`, optional): Safe masked visual representation for UI.
+- `error_code` (`string`, optional): Error identifier if `ok` is `false`. Host categories: `invalid_request` (malformed shape, bad profile id, or invalid ref-mode mix), `policy_denied` (missing `cap.auth.profile` or host policy denial), `budget_exhausted`, `not_configured` (auth resolver not wired on the host), `auth_unavailable` (profile lookup failed), `response_too_large`, `internal_error` (encode fallback).
+- `message` (`string`, optional): Error message if `ok` is `false`.
 
 ### 5.5 `HostRegisterDownloadAuthRequest` & `HostRegisterDownloadAuthResponse`
 
@@ -345,7 +347,7 @@ All structured communication between host and guest uses canonical UTF-8 JSON en
 ```
 - `ok` (`bool`, required): Whether registration succeeded.
 - `download_auth_ref` (`string`, optional): Opaque reference `dar-` + 32 lowercase hexadecimal characters, bound to the registering pack identity and current invocation.
-- `error_code` (`string`, optional): `invalid_request` (malformed request, wrong kind, invalid token), `policy_denied` (missing `cap.download.auth` or host policy denial), `budget_exhausted`, `registry_full` (registry full or per-invocation limit), `response_too_large`. The local CLI additionally emits `not_configured` and `broker_disabled`.
+- `error_code` (`string`, optional): `invalid_request` (malformed request, wrong kind, invalid token), `policy_denied` (missing `cap.download.auth` or host policy denial), `budget_exhausted`, `not_configured` (registry not wired; the local CLI emits this when the broker is disabled), `registry_full` (registry full or per-invocation limit), `response_too_large`, `internal_error` (encode fallback).
 - `message` (`string`, optional): Error message if `ok` is `false`.
 
 ### 5.6 `HostTimeRequest` & `HostTimeResponse`
@@ -367,7 +369,7 @@ The wire shape is exactly the empty object. Any field is rejected as `invalid_re
 ```
 - `ok` (`bool`, required): Whether the call succeeded.
 - `unix_secs` (`int64`, optional): Invocation-frozen Unix timestamp (seconds since epoch).
-- `error_code` (`string`, optional): `invalid_request`, `budget_exhausted`, `response_too_large`; the local CLI additionally emits `not_configured`.
+- `error_code` (`string`, optional): `invalid_request` (non-empty request object), `budget_exhausted`, `response_too_large`, `internal_error` (encode fallback). The local CLI answers `host_time` even when the broker is disabled — it never emits `not_configured` for this import.
 - `message` (`string`, optional): Error message if `ok` is `false`.
 
 ---
@@ -388,7 +390,7 @@ Guest extractors MUST NOT receive raw credentials (passwords, private tokens, co
 The download-auth channel is the single exception-shaped flow: a pack may *mint* its own credential (e.g. an anonymous session token it obtained itself) and hand it to the host via `goaria_host.register_download_auth`, receiving back only an opaque `download_auth_ref`. The ref — never the token — is the only value that may cross the ABI on `ExtractedItemRef.download_auth_ref`.
 
 ### 6.3 Resource Limits
-Extractors operate within resource boundaries defined in `resource_limits`:
+Extractors operate within resource boundaries defined in `resource_limits`. All six fields are required — the host rejects an absent or non-positive value, so "default" below refers to the values `cargo goaria-pack new` scaffolds into `manifest.json`:
 - `timeout_millis`: Host wall-clock deadline per invocation (default `5000`, maximum `10000` ms). The local `wasmi` runner maps this value to an approximate fuel/instruction budget; fuel is not a wall-clock timer and cannot preempt a blocking host call.
 - `max_memory_pages`: WebAssembly memory page cap (default `32`, maximum `256` pages).
 - `max_host_calls`: Maximum broker host calls permitted per invocation (default `50`, maximum `128`).
@@ -417,7 +419,7 @@ The host maintains a bounded, in-memory registry of pack-registered credentials:
 A compiled extractor distribution archive (`.pack.zip`) MUST adhere to deterministic ZIP packaging rules:
 - **Compression Method**: Uncompressed (`0` / `zip.Store`).
 - **File Permissions**: Fixed mode `0o644` (`0100644`).
-- **Timestamps**: Fixed UTC timestamp `2026-01-01T00:00:00Z` (`DosTime: 0x5c00`, `DosDate: 0x5c21`).
+- **Timestamps**: Fixed timestamp `2026-01-01T00:00:00` (`DosTime: 0x0000`, `DosDate: 0x5c21`; DOS timestamps carry no timezone).
 - **Archive Entry Sequence**:
   1. `manifest.json`: Canonical manifest JSON with SHA256 payload digest.
   2. `payload.wasm`: Compiled WebAssembly binary.
@@ -427,7 +429,8 @@ A compiled extractor distribution archive (`.pack.zip`) MUST adhere to determini
 - Digital signatures use standard Ed25519 (RFC 8032).
 - The signature is calculated over the exact bytes of `manifest.json`.
 - `manifest.json` contains `payload_sha256`, cryptographically binding the manifest to the WASM payload.
-- The signer public key is part of the pack's verified identity (`public_key_sha256`); the host binds authentication and profile state to it. Pack updates MUST be signed with the same key to be treated as the same publisher — a key change yields a new identity and orphans previously granted authentication state. Lock v1 admits exactly one `public_keys` entry per pack.
+- The signer public key is part of the pack's verified identity (`public_key_sha256`, computed from the key that passed signature verification); the host keys pack-scoped auth-runtime and host-policy state on the full verified identity. Pack updates MUST be signed with the same key to be treated as the same publisher — a key change yields a new identity that no longer matches stored auth-runtime state.
+- Lock v1 lists exactly one pack and requires exactly one `public_keys` entry: a lowercase-hex-encoded Ed25519 public key that becomes the pack's trusted verification key. Release builds may additionally embed packs with trusted keys baked into the host binary; those anchors do not come from the lock file.
 
 ### 7.3 Companion Lock File (`.lock.json`)
 The packaging tool outputs a companion lock file matching schema version `1`:

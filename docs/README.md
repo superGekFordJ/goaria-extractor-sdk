@@ -278,13 +278,13 @@ cargo goaria-pack run https://share.fixture.invalid/item/123 \
   --auth-profile default \
   --auth-secret my-developer-token
 ```
-The local runner injects the secret as a Bearer-style `Authorization` header value; other host auth kinds (e.g. Cookie profiles) are not simulated by `--auth-secret`.
+The flag registers a simulated `bearer` profile; on fetch hops the local runner sets the `Authorization` header to the secret verbatim. The production host normalizes a stored bearer credential to `Authorization: Bearer <token>`, so pass the full scheme-qualified value (e.g. `--auth-secret "Bearer my-token"`) to mirror the materialized host header. Other host auth kinds (e.g. Cookie profiles) are not simulated by `--auth-secret`.
 
 Execute with live network access:
 ```bash
 cargo goaria-pack run https://share.fixture.invalid/item/123 --live
 ```
-Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Basic fetch requests follow at most 5 redirects with per-hop domain/SSRF re-checks; extended fetch requests (`cap.http.fetch.extended`) fail closed on any redirect and require HTTPS. Auth-bearing requests require an HTTPS target on every hop.
+Live mode resolves and rejects non-public addresses inside the transport resolver used for the actual connection, preserving the original hostname for HTTP `Host` and TLS SNI/certificate validation. Basic fetch requests follow at most 5 redirects with per-hop domain/SSRF re-checks; extended fetch requests (`cap.http.fetch.extended`) fail closed on any redirect and require HTTPS. Auth-bearing requests require an HTTPS target on every hop. These egress rules are the same ones the production host broker enforces.
 
 Mock fixtures consumed by `test`/`run` are JSON objects (or arrays of objects) with:
 - exactly one URL pattern: `url`, `exact`, `prefix`, or `pattern` (`prefix` matches by string prefix; the other three match exactly);
@@ -296,7 +296,7 @@ Mock fixtures consumed by `test`/`run` are JSON objects (or arrays of objects) w
 The CLI verifies balanced ownership for ABI buffers visible to the host, including host-created input buffers and guest-returned output buffers. It cannot observe arbitrary allocations inside the guest allocator, so this check is not whole-guest leak detection and does not claim an exact leaked-byte count.
 
 ### 5.3 Execution Budget and Panic Isolation
-The production Go/Wazero host treats manifest `timeout_millis` as a cancellable wall-clock deadline. The local `wasmi` runner converts the same value into an approximate fuel/instruction budget for CPU-bound guest code; fuel cannot preempt a blocking host call and is not a wall-clock guarantee. Live HTTP request timeouts are separately capped by the manifest limit.
+The production Go/Wazero host treats manifest `timeout_millis` as a cancellable wall-clock deadline. The local `wasmi` runner converts the same value into an approximate fuel/instruction budget for CPU-bound guest code (`timeout_millis` × 1,000,000 fuel units); fuel cannot preempt a blocking host call and is not a wall-clock guarantee. Live HTTP request timeouts are separate: the effective per-request deadline is the smallest positive of the request `timeout_millis`, the manifest limit, and the broker policy maximum (10s).
 
 For Rust `wasm32-unknown-unknown`, the default `panic=abort` behavior emits a WebAssembly `unreachable` trap. `catch_unwind` cannot recover that panic; the host runtime isolates and reports the trap. ABI v1 has no structured `goaria_extract` error envelope, so ordinary returned extractor errors currently map to an empty `ExtractOutput`.
 
@@ -311,9 +311,9 @@ cargo goaria-pack keygen \
   --out-pub ~/.goaria/keys/key.pub
 ```
 
-**Signer continuity**: the Ed25519 public key is part of the pack's verified identity — the host records `public_key_sha256` alongside the pack ID and binds authentication/profile state to it. Sign every release of a pack with the **same key** so updates are recognized as the same publisher; signing with a different key produces a new identity and drops previously granted auth sessions. Back up the seed file — `keygen` never overwrites, and a lost seed cannot be recovered.
+**Signer continuity**: the Ed25519 public key is part of the pack's verified identity — the host computes `public_key_sha256` from the key that passed signature verification and keys pack-scoped auth-runtime and host-policy state on the full verified identity (pack ID, version, and the asset/manifest/payload/signature/public-key SHA-256 digests). Sign every release of a pack with the **same key** so updates are recognized as the same publisher; signing with a different key produces a new identity that does not match the stored auth-runtime entry, so previously granted auth sessions no longer resolve. Back up the seed file — `keygen` never overwrites, and a lost seed cannot be recovered.
 
-Note that `pack` without `--sign-key` falls back to a fresh **ephemeral** key each run, which never forms a stable identity. Always pass `--sign-key` for anything you intend to install or update.
+Note that `pack` without `--sign-key` generates a fresh **ephemeral** keypair each run (with a printed warning), which never forms a stable identity. Always pass `--sign-key` for anything you intend to install or update.
 
 ### 6.2 Deterministic Pack Generation
 ```bash
@@ -328,6 +328,6 @@ cargo goaria-pack pack \
 ## 7. Security Principles & Capabilities
 
 1. **Host-Custody Credential Isolation**: Raw tokens and cookies never touch guest WebAssembly memory.
-2. **Capability Declarations**: Extractors must declare `cap.parse.wasm`, `cap.http.fetch`, `cap.http.fetch.extended`, or `cap.auth.profile` in `manifest.json`. The extended fetch capability covers `POST`/`body_base64` and pack-owned `Authorization`/`X-*` headers; it requires `cap.http.fetch` and cannot be combined with `auth_profile_ref`.
+2. **Capability Declarations**: Extractors declare capabilities in `manifest.json`: `cap.parse.wasm` (required by every pack), `cap.http.fetch`, `cap.http.fetch.extended`, `cap.auth.profile`, and `cap.download.auth`. The extended fetch capability covers `POST`/`body_base64` and pack-owned `Authorization`/`X-*` headers; it requires `cap.http.fetch` and cannot be combined with `auth_profile_ref`. `cap.download.auth` covers `goaria_host.register_download_auth` for pack-minted bearer credentials; `goaria_host.host_time` requires no capability.
 3. **No-Name Policy / Zero Domain Leakage**: All tests, fixtures, and documentation strictly use RFC 2606 reserved domains (`fixture.invalid`, `example.com`).
 4. **Supply Chain Integrity**: Every pack is digitally signed with Ed25519 and verified against the GoAria host trust policy before execution.

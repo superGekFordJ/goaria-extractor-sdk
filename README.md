@@ -136,7 +136,7 @@ cargo goaria-pack pack --out-dir dist
 ## 🔒 Security Principles
 
 - **Host-Custody Credential Isolation**: WebAssembly guest plugins never store or access raw authorization tokens, secrets, or cookies. All authentication is attached securely by the host runtime.
-- **Granular Capabilities**: Plugins explicitly declare permissions (`cap.parse.wasm`, `cap.http.fetch`, `cap.http.fetch.extended`, `cap.auth.profile`) in `manifest.json`.
+- **Granular Capabilities**: Plugins explicitly declare permissions (`cap.parse.wasm`, `cap.http.fetch`, `cap.http.fetch.extended`, `cap.auth.profile`, `cap.download.auth`) in `manifest.json`.
 - **Zero Domain Leakage**: Development, testing, and fixture suites use RFC 2606 reserved domains (`fixture.invalid`, `example.com`).
 - **Cryptographic Supply Chain Integrity**: Packs are packaged deterministically and signed with Ed25519 digital signatures.
 
