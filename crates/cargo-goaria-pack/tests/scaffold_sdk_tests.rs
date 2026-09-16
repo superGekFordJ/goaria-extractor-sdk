@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use cargo_goaria_pack::cli::{Language, SdkSource};
+use cargo_goaria_pack::cli::{Language, NewArgs, SdkSource};
+use cargo_goaria_pack::commands::new::handle_new;
 use cargo_goaria_pack::scaffold::sdk_assets::{
     zig_package_name, VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
 };
@@ -357,4 +358,190 @@ fn test_new_command_reports_sdk_source() {
     assert!(project_dir
         .join("vendor/goaria-extractor-sdk/Cargo.toml")
         .exists());
+}
+
+fn make_fake_zig_sdk(root: &Path) -> PathBuf {
+    let dir = root.join("fake_zig_sdk");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("build.zig"), "pub fn build() {}").unwrap();
+    std::fs::write(
+        dir.join("build.zig.zon"),
+        ".{ .name = .goaria_sdk, .version = \"0.1.0\" }",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src").join("root.zig"), "pub const x = 1;").unwrap();
+    dir
+}
+
+#[test]
+fn test_zig_sdk_path_into_own_subtree_rejected() {
+    let temp = tempfile::tempdir().unwrap();
+    let sdk_dir = make_fake_zig_sdk(temp.path());
+    // Target lives inside the source dir — copying would recurse into itself.
+    let project_dir = sdk_dir.join("new_pack");
+
+    let spec = resolve_sdk_spec(Language::Zig, None, None, Some(sdk_dir.clone())).unwrap();
+    let res = scaffold_project("new-pack", Language::Zig, &project_dir, &spec);
+    assert!(
+        matches!(res, Err(ScaffoldError::SdkPathContainsTarget(..))),
+        "expected SdkPathContainsTarget, got {res:?}"
+    );
+    // The scaffolded dir was created by us and must be fully cleaned up.
+    assert!(!project_dir.exists());
+    assert!(!sdk_dir.join("vendor").exists());
+}
+
+#[test]
+fn test_sdk_ref_rejects_toml_injection() {
+    for bad in ["bad\"ref", "a b", "x\\y", "tab\tref", ""] {
+        let res = resolve_sdk_spec(
+            Language::Rust,
+            Some(SdkSource::Git),
+            Some(bad.to_string()),
+            None,
+        );
+        assert!(
+            matches!(res, Err(ScaffoldError::InvalidSdkRef(_))),
+            "expected InvalidSdkRef for {bad:?}"
+        );
+    }
+    // Commit SHAs, tags, and branch names still pass.
+    for good in ["v0.2.0", "main", "abc1234", "feature/foo-bar"] {
+        assert!(resolve_sdk_spec(
+            Language::Rust,
+            Some(SdkSource::Git),
+            Some(good.to_string()),
+            None,
+        )
+        .is_ok());
+    }
+}
+
+#[test]
+fn test_sdk_path_requires_real_package_marker() {
+    // The workspace root manifest mentions the repo URL but is not the SDK crate.
+    let res = resolve_sdk_spec(Language::Rust, None, None, Some(workspace_root()));
+    assert!(matches!(res, Err(ScaffoldError::InvalidSdkPath(..))));
+
+    let temp = tempfile::tempdir().unwrap();
+
+    // Rust: right name but missing src/lib.rs.
+    let fake_sdk = temp.path().join("fake_rust_sdk");
+    std::fs::create_dir_all(&fake_sdk).unwrap();
+    std::fs::write(
+        fake_sdk.join("Cargo.toml"),
+        "[package]
+name = \"goaria-extractor-sdk\"
+version = \"0.1.0\"
+",
+    )
+    .unwrap();
+    let res = resolve_sdk_spec(Language::Rust, None, None, Some(fake_sdk));
+    assert!(matches!(res, Err(ScaffoldError::InvalidSdkPath(..))));
+
+    // Zig: a lookalike package name must not pass.
+    let fake_zig = temp.path().join("fake_zig");
+    std::fs::create_dir_all(fake_zig.join("src")).unwrap();
+    std::fs::write(fake_zig.join("build.zig"), "pub fn build() {}").unwrap();
+    std::fs::write(fake_zig.join("src").join("root.zig"), "").unwrap();
+    std::fs::write(
+        fake_zig.join("build.zig.zon"),
+        ".{ .name = .goaria_sdk_fork }",
+    )
+    .unwrap();
+    let res = resolve_sdk_spec(Language::Zig, None, None, Some(fake_zig));
+    assert!(matches!(res, Err(ScaffoldError::InvalidSdkPath(..))));
+
+    // Zig: right name but missing src/root.zig.
+    let fake_zig2 = temp.path().join("fake_zig2");
+    std::fs::create_dir_all(&fake_zig2).unwrap();
+    std::fs::write(fake_zig2.join("build.zig"), "pub fn build() {}").unwrap();
+    std::fs::write(fake_zig2.join("build.zig.zon"), ".{ .name = .goaria_sdk }").unwrap();
+    let res = resolve_sdk_spec(Language::Zig, None, None, Some(fake_zig2));
+    assert!(matches!(res, Err(ScaffoldError::InvalidSdkPath(..))));
+}
+
+#[test]
+fn test_new_validates_pack_name_before_sdk_io() {
+    let temp = tempfile::tempdir().unwrap();
+    let res = handle_new(NewArgs {
+        name: "x".to_string(), // too short
+        lang: Language::Rust,
+        sdk: None,
+        sdk_ref: None,
+        sdk_path: Some(temp.path().join("nonexistent")),
+        path: Some(temp.path().join("out")),
+    });
+    assert!(matches!(res, Err(ScaffoldError::InvalidPackName(_))));
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name();
+        if entry.file_type().unwrap().is_dir() {
+            if name == ".zig-cache" || name == "zig-out" || name == ".git" {
+                continue;
+            }
+            collect_files(root, &entry.path(), out);
+        } else {
+            out.push(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .replace('\\', "/"),
+            );
+        }
+    }
+}
+
+#[test]
+fn test_embedded_sdk_tables_cover_source_trees() {
+    use cargo_goaria_pack::scaffold::sdk_assets::{
+        RUST_MACRO_FILES, RUST_SDK_FILES, ZIG_SDK_FILES,
+    };
+
+    let check = |dir: PathBuf,
+                 files: &[cargo_goaria_pack::scaffold::sdk_assets::EmbeddedFile],
+                 required_prefix: Option<&str>| {
+        let mut on_disk = Vec::new();
+        collect_files(&dir, &dir, &mut on_disk);
+        let embedded: std::collections::BTreeSet<_> = files.iter().map(|f| f.rel_path).collect();
+        for rel in on_disk {
+            if let Some(prefix) = required_prefix {
+                if !rel.starts_with(prefix) {
+                    continue;
+                }
+            }
+            assert!(
+                embedded.contains(rel.as_str()),
+                "{rel} exists in {} but is not embedded",
+                dir.display()
+            );
+        }
+        for rel in &embedded {
+            assert!(dir.join(rel).exists(), "embedded {rel} missing on disk");
+        }
+    };
+
+    // Rust vendoring covers src/ only; crate manifests are replaced by the
+    // flattened VENDORED_*_CARGO_TOML templates and tests/ is excluded by design.
+    check(
+        workspace_root().join("crates/goaria-extractor-sdk"),
+        RUST_SDK_FILES,
+        Some("src/"),
+    );
+    check(
+        workspace_root().join("crates/goaria-extractor-macro"),
+        RUST_MACRO_FILES,
+        Some("src/"),
+    );
+    check(
+        workspace_root().join("sdk").join("zig"),
+        ZIG_SDK_FILES,
+        None,
+    );
 }

@@ -1,6 +1,8 @@
 use crate::cli::NewArgs;
 use crate::scaffold::sdk_assets::{EMBEDDED_SDK_VERSION, SDK_GIT_URL};
-use crate::scaffold::{resolve_sdk_spec, scaffold_project, ScaffoldError, SdkSpec};
+use crate::scaffold::{
+    resolve_sdk_spec, scaffold_project, validate_pack_name, ScaffoldError, SdkSpec,
+};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -21,6 +23,7 @@ fn describe_sdk_spec(spec: &SdkSpec) -> String {
 }
 
 pub fn handle_new(args: NewArgs) -> Result<(), ScaffoldError> {
+    validate_pack_name(&args.name)?;
     let target_dir = args
         .path
         .clone()
@@ -38,6 +41,12 @@ pub fn handle_new(args: NewArgs) -> Result<(), ScaffoldError> {
         "SDK source:".cyan().bold(),
         describe_sdk_spec(&spec)
     );
+    if let SdkSpec::Crates = spec {
+        println!(
+            "  {} goaria-extractor-sdk is not published to crates.io yet; use --sdk vendor or --sdk-path",
+            "Warning:".yellow().bold()
+        );
+    }
 
     scaffold_project(&args.name, args.lang, &target_dir, &spec)?;
 

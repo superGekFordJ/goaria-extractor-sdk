@@ -86,7 +86,7 @@ pub struct NewArgs {
     #[arg(long, value_name = "REF")]
     pub sdk_ref: Option<String>,
 
-    /// Path to a local goaria SDK package directory (overrides --sdk;
+    /// Path to a local goaria SDK package directory (mutually exclusive with --sdk;
     /// rust: dir containing the SDK Cargo.toml; zig: dir containing sdk/zig's build.zig.zon)
     #[arg(long, value_name = "DIR")]
     pub sdk_path: Option<PathBuf>,

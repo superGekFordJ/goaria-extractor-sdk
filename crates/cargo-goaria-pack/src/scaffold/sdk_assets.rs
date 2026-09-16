@@ -7,6 +7,7 @@ pub struct EmbeddedFile {
     pub contents: &'static str,
 }
 
+// This crate shares the workspace version with the SDK crates it embeds.
 pub const EMBEDDED_SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SDK_GIT_URL: &str = "https://github.com/superGekFordJ/goaria-extractor-sdk";
 
