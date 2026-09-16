@@ -22,11 +22,20 @@ static MOCK_HEAP: Mutex<Option<HashMap<i32, MockAllocEntry>>> = Mutex::new(None)
 #[cfg(not(target_arch = "wasm32"))]
 static NEXT_HANDLE: AtomicI32 = AtomicI32::new(1);
 
-/// Convert a guest memory handle/pointer `i32` into a raw host pointer `*mut u8`.
+/// Convert a guest memory handle/pointer `i32` into a raw pointer `*mut u8`.
+///
+/// On `wasm32` the value is a linear-memory offset cast directly to a
+/// pointer. On native targets it is a handle into the SDK's mock heap used
+/// by tests; unknown handles yield null.
 ///
 /// # Safety
-/// The caller must ensure that `ptr` represents a valid guest memory address or handle
-/// allocated by [`alloc`].
+/// On `wasm32` the caller must ensure `ptr` is a valid offset within the
+/// exported linear memory for the buffer being accessed. Dereferencing the
+/// result additionally requires the buffer to be live (not yet freed via
+/// [`free`]).
+///
+/// # Panics
+/// Panics on non-wasm32 targets if the mock-heap mutex is poisoned.
 #[inline]
 pub unsafe fn ptr_to_raw(ptr: i32) -> *mut u8 {
     if ptr == 0 {
@@ -48,11 +57,22 @@ pub unsafe fn ptr_to_raw(ptr: i32) -> *mut u8 {
     }
 }
 
-/// Allocate contiguous bytes in guest memory.
+/// Allocate `len` contiguous bytes in guest memory, backing the exported
+/// `goaria_alloc`.
+///
+/// Returns the guest-memory pointer/handle, or `0` when `len <= 0` or
+/// allocation fails. The host calls this to stage both input buffers and
+/// host-import response buffers; the guest calls it for output buffers it
+/// returns across the ABI.
 ///
 /// # Safety
-/// The caller must guarantee that the allocated memory will be properly deallocated
-/// using [`free`].
+/// Every non-zero return owns `len` bytes that must be released exactly once
+/// via [`free`] with the same `len` (the deallocation layout is
+/// reconstructed from `len`), or handed to the host, which then performs
+/// that `goaria_free` itself.
+///
+/// # Panics
+/// Panics on non-wasm32 targets if the mock-heap mutex is poisoned.
 pub unsafe fn alloc(len: i32) -> i32 {
     if len <= 0 {
         return 0;
@@ -84,10 +104,21 @@ pub unsafe fn alloc(len: i32) -> i32 {
     }
 }
 
-/// Deallocate memory buffer previously allocated with `alloc`.
+/// Deallocate a buffer previously returned by [`alloc`], backing the
+/// exported `goaria_free`.
+///
+/// No-ops on `ptr == 0` or `len <= 0`.
 ///
 /// # Safety
-/// The `ptr` and `len` must correspond to a valid buffer previously allocated by [`alloc`].
+/// `ptr`/`len` must come from a single live [`alloc`] allocation: `len` must
+/// equal the originally requested length, the buffer must not have been
+/// freed already, and no live pointers may alias it. Under the ABI the host
+/// calls this on input buffers and on buffers the guest returned; the guest
+/// calls it (typically through [`GuestBuffer`]) on host-import response
+/// buffers it owns.
+///
+/// # Panics
+/// Panics on non-wasm32 targets if the mock-heap mutex is poisoned.
 pub unsafe fn free(ptr: i32, len: i32) {
     if ptr == 0 || len <= 0 {
         return;
@@ -116,10 +147,15 @@ pub unsafe fn free(ptr: i32, len: i32) {
     }
 }
 
-/// Allocate a new buffer in guest memory and copy `slice` into it.
+/// Allocate a fresh guest buffer via [`alloc`] and copy `slice` into it.
+///
+/// Returns `(ptr, len)`, or `(0, 0)` for an empty slice or on allocation
+/// failure.
 ///
 /// # Safety
-/// The allocated buffer must subsequently be managed and deallocated safely.
+/// On success the returned buffer is owned by the caller and must be
+/// released exactly once via [`free`], or ownership may be handed to the
+/// host by returning it from an ABI entrypoint.
 pub unsafe fn copy_slice_to_guest(slice: &[u8]) -> (i32, i32) {
     let len = slice.len() as i32;
     if len <= 0 {
@@ -138,19 +174,24 @@ pub unsafe fn copy_slice_to_guest(slice: &[u8]) -> (i32, i32) {
     (ptr, len)
 }
 
-/// RAII wrapper around a buffer allocated in guest memory (e.g. returned by host import).
-/// Automatically frees the buffer on drop.
+/// RAII owner for a buffer living in guest memory — typically a host-import
+/// response buffer the host allocated inside the guest via `goaria_alloc`.
+/// Frees the buffer with [`free`] on drop.
 pub struct GuestBuffer {
     ptr: i32,
     len: i32,
 }
 
 impl GuestBuffer {
-    /// Constructs a `GuestBuffer` from raw host-allocated pointer and length.
+    /// Wraps a raw pointer/length pair returned by a host import.
+    ///
+    /// Returns `None` for a null pointer, an empty buffer, or a length
+    /// exceeding `i32::MAX`.
     ///
     /// # Safety
-    /// The caller must ensure that `ptr` and `len` represent a valid host-allocated guest buffer
-    /// that is owned by this `GuestBuffer` and must be deallocated using [`free`].
+    /// `ptr`/`len` must designate a live guest buffer allocated via
+    /// [`alloc`] (on the host's behalf) whose ownership transfers to the
+    /// returned `GuestBuffer`; it must not be freed elsewhere afterwards.
     pub(crate) unsafe fn from_host_raw(ptr: u32, len: u32) -> Option<Self> {
         if ptr == 0 || len == 0 || len > i32::MAX as u32 {
             None
@@ -162,18 +203,22 @@ impl GuestBuffer {
         }
     }
 
+    /// Guest-memory pointer/handle of the buffer.
     pub fn ptr(&self) -> i32 {
         self.ptr
     }
 
+    /// Buffer length in bytes.
     pub fn len(&self) -> i32 {
         self.len
     }
 
+    /// Whether the buffer holds zero bytes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
+    /// View the buffer contents as a byte slice.
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             let raw = ptr_to_raw(self.ptr);
@@ -185,6 +230,10 @@ impl GuestBuffer {
         }
     }
 
+    /// View the buffer contents as UTF-8 text.
+    ///
+    /// # Errors
+    /// Returns [`Utf8Error`] if the buffer is not valid UTF-8.
     pub fn as_str(&self) -> Result<&str, Utf8Error> {
         std::str::from_utf8(self.as_slice())
     }

@@ -35,7 +35,20 @@ unsafe fn host_time(req_ptr: i32, req_len: i32) -> i64 {
     0
 }
 
-/// Low-level invocation of goaria_host.http_fetch.
+/// Low-level invocation of `goaria_host.http_fetch` (`cap.http.fetch`).
+///
+/// `request_json_bytes` stays guest-owned: the host reads it for the
+/// duration of the call and does not retain it. On success the returned
+/// [`GuestBuffer`] wraps a response buffer the host allocated inside the
+/// guest via `goaria_alloc`; the guest owns it and it is freed on drop.
+///
+/// # Errors
+/// Returns [`ExtractorError::HostError`] with the SDK-minted code
+/// `host_call_failed` when the import returns `0` (transport-level failure;
+/// also the result on non-wasm32 stub targets) or
+/// `invalid_response_buffer` when the returned handle does not describe a
+/// valid buffer. Host-reported failures such as `policy_denied` arrive
+/// inside the response payload (`ok: false`), not here.
 pub fn raw_http_fetch(request_json_bytes: &[u8]) -> Result<GuestBuffer, ExtractorError> {
     let req_len = request_json_bytes.len() as i32;
     let req_ptr = request_json_bytes.as_ptr() as i32;
@@ -57,7 +70,14 @@ pub fn raw_http_fetch(request_json_bytes: &[u8]) -> Result<GuestBuffer, Extracto
     })
 }
 
-/// Low-level invocation of goaria_host.auth_profile_status.
+/// Low-level invocation of `goaria_host.auth_profile_status`
+/// (`cap.auth.profile`). Same buffer ownership convention as
+/// [`raw_http_fetch`].
+///
+/// # Errors
+/// Returns [`ExtractorError::HostError`] with `host_call_failed` on a `0`
+/// return (transport failure) or `invalid_response_buffer` on a malformed
+/// response handle.
 pub fn raw_auth_profile_status(request_json_bytes: &[u8]) -> Result<GuestBuffer, ExtractorError> {
     let req_len = request_json_bytes.len() as i32;
     let req_ptr = request_json_bytes.as_ptr() as i32;
@@ -79,7 +99,14 @@ pub fn raw_auth_profile_status(request_json_bytes: &[u8]) -> Result<GuestBuffer,
     })
 }
 
-/// Low-level invocation of goaria_host.register_download_auth.
+/// Low-level invocation of `goaria_host.register_download_auth`
+/// (`cap.download.auth`). Same buffer ownership convention as
+/// [`raw_http_fetch`].
+///
+/// # Errors
+/// Returns [`ExtractorError::HostError`] with `host_call_failed` on a `0`
+/// return (transport failure) or `invalid_response_buffer` on a malformed
+/// response handle.
 pub fn raw_register_download_auth(
     request_json_bytes: &[u8],
 ) -> Result<GuestBuffer, ExtractorError> {
@@ -103,7 +130,13 @@ pub fn raw_register_download_auth(
     })
 }
 
-/// Low-level invocation of goaria_host.host_time.
+/// Low-level invocation of `goaria_host.host_time` (no capability required).
+/// Same buffer ownership convention as [`raw_http_fetch`].
+///
+/// # Errors
+/// Returns [`ExtractorError::HostError`] with `host_call_failed` on a `0`
+/// return (transport failure) or `invalid_response_buffer` on a malformed
+/// response handle.
 pub fn raw_host_time(request_json_bytes: &[u8]) -> Result<GuestBuffer, ExtractorError> {
     let req_len = request_json_bytes.len() as i32;
     let req_ptr = request_json_bytes.as_ptr() as i32;

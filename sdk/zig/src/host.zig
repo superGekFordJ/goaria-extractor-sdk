@@ -3,28 +3,46 @@ const builtin = @import("builtin");
 const types = @import("types.zig");
 const abi = @import("abi.zig");
 
-/// Low-level host imports for the "goaria_host" module.
+/// Low-level host imports for the "goaria_host" module. On wasm32 these are
+/// extern imports; on native targets they are stubs returning `0`.
+///
+/// Shared convention: the request buffer is guest-owned — the host reads it
+/// during the call and does not retain it. The return value is a packed
+/// `ptr << 32 | len` handle to a response buffer the host allocated inside
+/// the guest via `goaria_alloc`; the guest owns it and must release it with
+/// `goaria_free` (`GuestBuffer.deinit`). A `0` return is a transport-level
+/// failure — no response was written — while host-reported failures travel
+/// inside the response payload (`ok: false` + `error_code`).
 pub const raw = if (builtin.target.cpu.arch.isWasm()) struct {
+    /// Brokered HTTP fetch (`cap.http.fetch`; extended features additionally
+    /// require `cap.http.fetch.extended`).
     pub extern "goaria_host" fn http_fetch(req_ptr: i32, req_len: i32) i64;
+    /// Auth-profile availability query (`cap.auth.profile`).
     pub extern "goaria_host" fn auth_profile_status(req_ptr: i32, req_len: i32) i64;
+    /// Register a pack-minted bearer token (`cap.download.auth`).
     pub extern "goaria_host" fn register_download_auth(req_ptr: i32, req_len: i32) i64;
+    /// Invocation-frozen Unix timestamp (no capability required).
     pub extern "goaria_host" fn host_time(req_ptr: i32, req_len: i32) i64;
 } else struct {
+    /// Native stub for `http_fetch`; always returns `0`.
     pub fn http_fetch(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
         _ = req_len;
         return 0;
     }
+    /// Native stub for `auth_profile_status`; always returns `0`.
     pub fn auth_profile_status(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
         _ = req_len;
         return 0;
     }
+    /// Native stub for `register_download_auth`; always returns `0`.
     pub fn register_download_auth(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
         _ = req_len;
         return 0;
     }
+    /// Native stub for `host_time`; always returns `0`.
     pub fn host_time(req_ptr: i32, req_len: i32) i64 {
         _ = req_ptr;
         _ = req_len;
@@ -32,17 +50,44 @@ pub const raw = if (builtin.target.cpu.arch.isWasm()) struct {
     }
 };
 
-/// High-level client for GoAria host services.
+/// High-level client for GoAria host services. Stateless: each method
+/// serializes a request DTO, invokes the matching `goaria_host` import, and
+/// decodes the response. Every call consumes one unit of the manifest
+/// `resource_limits.max_host_calls` budget; exhaustion surfaces as a
+/// `budget_exhausted` wire error.
 pub const HostBroker = struct {
+    /// Errors surfaced by host-import calls and response decoding.
+    ///
+    /// Note that host-reported failures mostly travel in-band: a response
+    /// with `ok: false` and a wire `error_code` (`invalid_request`,
+    /// `policy_denied`, `budget_exhausted`, `not_configured`,
+    /// `response_too_large`, `internal_error`, `registry_full`,
+    /// `auth_unavailable`, `fetch_failed`, `authenticated_fetch_failed`)
+    /// reaches the caller as a parsed response, not as an `Error` — except
+    /// where a method documents `HttpError`. The local CLI additionally
+    /// emits `no_mock_match`, `broker_disabled`, and
+    /// `ref_mode_not_supported_in_live_runner`.
     pub const Error = error{
+        /// The host call itself failed (`0` return = transport failure) or
+        /// a guest-side allocation failed.
         HostCallFailed,
+        /// The host returned a malformed or missing response buffer/field.
         InvalidResponseBuffer,
+        /// The response buffer was not valid JSON for the expected type.
         JsonParseError,
+        /// The response `body_base64` could not be decoded.
         Base64DecodeError,
+        /// The response payload reported `ok: false`; inspect `error_code`
+        /// via `fetch` for the wire-level reason.
         HttpError,
     };
 
     /// Raw low-level invocation of goaria_host.http_fetch.
+    ///
+    /// Returns a guest-owned `GuestBuffer` (freed via `deinit`).
+    /// `HostCallFailed` on a `0` return (transport failure; also the result
+    /// on native stub targets), `InvalidResponseBuffer` on a malformed
+    /// handle.
     pub fn rawHttpFetch(request_json_bytes: []const u8) Error!abi.GuestBuffer {
         const req_len: i32 = @intCast(request_json_bytes.len);
         const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
@@ -54,7 +99,8 @@ pub const HostBroker = struct {
         return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
     }
 
-    /// Raw low-level invocation of goaria_host.auth_profile_status.
+    /// Raw low-level invocation of goaria_host.auth_profile_status. Same
+    /// ownership and error mapping as `rawHttpFetch`.
     pub fn rawAuthProfileStatus(request_json_bytes: []const u8) Error!abi.GuestBuffer {
         const req_len: i32 = @intCast(request_json_bytes.len);
         const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
@@ -66,7 +112,8 @@ pub const HostBroker = struct {
         return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
     }
 
-    /// Raw low-level invocation of goaria_host.register_download_auth.
+    /// Raw low-level invocation of goaria_host.register_download_auth. Same
+    /// ownership and error mapping as `rawHttpFetch`.
     pub fn rawRegisterDownloadAuth(request_json_bytes: []const u8) Error!abi.GuestBuffer {
         const req_len: i32 = @intCast(request_json_bytes.len);
         const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
@@ -78,7 +125,8 @@ pub const HostBroker = struct {
         return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
     }
 
-    /// Raw low-level invocation of goaria_host.host_time.
+    /// Raw low-level invocation of goaria_host.host_time. Same ownership and
+    /// error mapping as `rawHttpFetch`.
     pub fn rawHostTime(request_json_bytes: []const u8) Error!abi.GuestBuffer {
         const req_len: i32 = @intCast(request_json_bytes.len);
         const req_ptr: i32 = @intCast(@intFromPtr(request_json_bytes.ptr));
@@ -90,7 +138,16 @@ pub const HostBroker = struct {
         return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
     }
 
-    /// Execute an HTTP fetch request via host broker.
+    /// Execute an HTTP fetch request via the host broker.
+    ///
+    /// Requires `cap.http.fetch`; extended features on the request
+    /// additionally require `cap.http.fetch.extended`. This is the raw level:
+    /// an `ok: false` payload is *not* an error — inspect `error_code` on the
+    /// returned value (see `Error` for the category list). Caller owns the
+    /// returned `std.json.Parsed` and must call `deinit`.
+    ///
+    /// Errors: `HostCallFailed` (transport failure or JSON encode
+    /// allocation), `InvalidResponseBuffer`, `JsonParseError`.
     pub fn fetch(
         allocator: std.mem.Allocator,
         req: types.HostHTTPFetchRequest,
@@ -113,7 +170,7 @@ pub const HostBroker = struct {
         ) catch Error.JsonParseError;
     }
 
-    /// Fetch a direct URL using standard GET method.
+    /// Fetch a direct URL via raw mode (`GET`). Same contract as `fetch`.
     pub fn fetchUrl(
         allocator: std.mem.Allocator,
         url: []const u8,
@@ -126,8 +183,12 @@ pub const HostBroker = struct {
 
     /// POST `body` to `url` with a single `Content-Type` header.
     ///
-    /// Requires the manifest to declare `cap.http.fetch.extended` alongside
-    /// `cap.http.fetch`; the host performs all request validation.
+    /// Requires `cap.http.fetch.extended` alongside `cap.http.fetch`.
+    /// Extended requests must use HTTPS and fail closed on any redirect. The
+    /// host performs all request validation: `content_type` must be
+    /// `application/json` or `application/x-www-form-urlencoded` and the
+    /// decoded body is capped at 16 KiB. Same `ok`/`error_code` contract as
+    /// `fetch`.
     pub fn fetchUrlWithBody(
         allocator: std.mem.Allocator,
         url: []const u8,
@@ -139,8 +200,12 @@ pub const HostBroker = struct {
         return fetch(allocator, req);
     }
 
-    /// Fetch an endpoint via alias ref mode (broker_policy_ref + endpoint_ref,
-    /// optional substitution params).
+    /// Fetch an endpoint via ref mode (`broker_policy_ref` + `endpoint_ref`,
+    /// optional substitution `params`), valid under an alias (policy-ref)
+    /// manifest. The local runner resolves ref mode only against mock
+    /// fixtures; a `--live` run fails it in-band with
+    /// `ref_mode_not_supported_in_live_runner`. Same `ok`/`error_code`
+    /// contract as `fetch`.
     pub fn fetchRef(
         allocator: std.mem.Allocator,
         broker_policy_ref: []const u8,
@@ -150,7 +215,11 @@ pub const HostBroker = struct {
         return fetch(allocator, buildRefRequest(broker_policy_ref, endpoint_ref, params));
     }
 
-    /// Fetch and decode the response body as raw bytes.
+    /// Fetch and decode the response `body_base64` as raw bytes.
+    ///
+    /// Unlike `fetch`, an `ok: false` payload maps to `HttpError` here.
+    /// Caller owns the returned slice; a missing or empty body yields an
+    /// empty slice. `Base64DecodeError` when the payload is not valid base64.
     pub fn fetchBytes(
         allocator: std.mem.Allocator,
         req: types.HostHTTPFetchRequest,
@@ -173,7 +242,8 @@ pub const HostBroker = struct {
         return out_buf;
     }
 
-    /// Fetch and decode the response body as a UTF-8 string.
+    /// Fetch and decode the response body as a UTF-8 string (alias of
+    /// `fetchBytes`; no separate validation is performed).
     pub fn fetchText(
         allocator: std.mem.Allocator,
         req: types.HostHTTPFetchRequest,
@@ -182,6 +252,13 @@ pub const HostBroker = struct {
     }
 
     /// Query authentication profile status from the host.
+    ///
+    /// Requires `cap.auth.profile`. Like `fetch`, an `ok: false` payload is
+    /// *not* an error — a profile lookup miss or host denial arrives in-band
+    /// (`error_code`: `invalid_request`, `policy_denied`,
+    /// `budget_exhausted`, `not_configured`, `auth_unavailable`,
+    /// `response_too_large`, `internal_error`). Caller owns the returned
+    /// `std.json.Parsed` and must call `deinit`.
     pub fn authProfileStatus(
         allocator: std.mem.Allocator,
         req: types.HostAuthProfileStatusRequest,
@@ -204,7 +281,10 @@ pub const HostBroker = struct {
         ) catch Error.JsonParseError;
     }
 
-    /// Convenience check for whether an auth profile is available for a given URL.
+    /// Convenience check for whether an auth profile is available for a
+    /// raw-mode URL. Returns `false` both when the profile holds no
+    /// credentials and when the status call itself resolved to `ok: false` —
+    /// use `authProfileStatus` to distinguish those cases.
     pub fn isAuthAvailable(
         allocator: std.mem.Allocator,
         auth_profile_ref: []const u8,
@@ -220,9 +300,17 @@ pub const HostBroker = struct {
     }
 
     /// Register a pack-minted bearer token with the host download-auth
-    /// channel. On success the caller owns the parsed response whose
-    /// `download_auth_ref` is the opaque ref to bind onto emitted items.
-    /// Requires the manifest to declare `cap.download.auth`.
+    /// channel. Requires `cap.download.auth`.
+    ///
+    /// `token` is the raw credential: 1–8170 bytes of valid UTF-8 without
+    /// CR/LF, and it must not already carry a `Bearer ` scheme prefix. After
+    /// the call the token is host-only — on success the response's
+    /// `download_auth_ref` (`dar-` + 32 lowercase hex, bound to this pack
+    /// identity and invocation) is the only value that may appear on
+    /// `ExtractedItemRef.download_auth_ref`. An `ok: false` payload
+    /// (`invalid_request`, `policy_denied`, `budget_exhausted`,
+    /// `not_configured`, `registry_full`, …) is not an error; inspect
+    /// `error_code`. Caller owns the returned `std.json.Parsed`.
     pub fn registerDownloadAuth(
         allocator: std.mem.Allocator,
         token: []const u8,
@@ -249,8 +337,16 @@ pub const HostBroker = struct {
         ) catch Error.JsonParseError;
     }
 
-    /// Invocation-scoped Unix timestamp snapshot from the host. Each call
-    /// consumes one host-call budget unit.
+    /// Invocation-scoped Unix timestamp (seconds) snapshot from the host.
+    /// Requires no capability. The value is frozen for the duration of one
+    /// invocation — repeated calls inside the same `goaria_extract` return
+    /// identical timestamps — but each call still consumes one host-call
+    /// budget unit.
+    ///
+    /// Errors: `HttpError` on an `ok: false` payload (`invalid_request`,
+    /// `budget_exhausted`, `response_too_large`, `internal_error`),
+    /// `InvalidResponseBuffer` when `unix_secs` is missing, plus the
+    /// transport/decode errors of `rawHostTime`.
     pub fn hostTime(allocator: std.mem.Allocator) Error!i64 {
         const req_json = "{}";
 
