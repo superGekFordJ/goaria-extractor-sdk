@@ -80,7 +80,9 @@ pub fn raw_auth_profile_status(request_json_bytes: &[u8]) -> Result<GuestBuffer,
 }
 
 /// Low-level invocation of goaria_host.register_download_auth.
-pub fn raw_register_download_auth(request_json_bytes: &[u8]) -> Result<GuestBuffer, ExtractorError> {
+pub fn raw_register_download_auth(
+    request_json_bytes: &[u8],
+) -> Result<GuestBuffer, ExtractorError> {
     let req_len = request_json_bytes.len() as i32;
     let req_ptr = request_json_bytes.as_ptr() as i32;
 

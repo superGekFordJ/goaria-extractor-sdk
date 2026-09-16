@@ -385,14 +385,13 @@ fn parse_request_expectation(
         ),
         None => None,
     };
-    let omit_browser_context = match object.get("omit_browser_context") {
-        Some(value) => Some(
-            value
-                .as_bool()
-                .ok_or_else(|| fixture_error(path, "expect.omit_browser_context must be a boolean"))?,
-        ),
-        None => None,
-    };
+    let omit_browser_context =
+        match object.get("omit_browser_context") {
+            Some(value) => Some(value.as_bool().ok_or_else(|| {
+                fixture_error(path, "expect.omit_browser_context must be a boolean")
+            })?),
+            None => None,
+        };
 
     Ok(MockRequestExpectation {
         method,
@@ -428,7 +427,10 @@ fn parse_run_assertions(
             .as_u64()
             .and_then(|count| usize::try_from(count).ok())
             .ok_or_else(|| {
-                fixture_error(path, "assert.registered_download_auth_refs must be a non-negative integer")
+                fixture_error(
+                    path,
+                    "assert.registered_download_auth_refs must be a non-negative integer",
+                )
             })?;
         assertions.registered_download_auth_refs = Some(count);
     }
@@ -569,10 +571,7 @@ pub fn handle_test(args: TestArgs) -> Result<(), TestCommandError> {
                                 println!("{} (items: {})", "ok".green(), extract_out.items.len());
                                 passed += 1;
                                 if let Some(expected) = assertions.registered_download_auth_refs {
-                                    print!(
-                                        "  test download-auth registrations({}) ... ",
-                                        test_url
-                                    );
+                                    print!("  test download-auth registrations({}) ... ", test_url);
                                     if registered_refs.len() == expected {
                                         println!("{} (refs: {})", "ok".green(), expected);
                                         passed += 1;

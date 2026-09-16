@@ -431,7 +431,9 @@ pub fn validate_capabilities(capabilities: &[Capability]) -> Result<(), Manifest
             CAPABILITY_PARSE_WASM => {
                 has_parse_wasm = true;
             }
-            CAPABILITY_HTTP_FETCH | CAPABILITY_HTTP_FETCH_EXTENDED | CAPABILITY_AUTH_PROFILE
+            CAPABILITY_HTTP_FETCH
+            | CAPABILITY_HTTP_FETCH_EXTENDED
+            | CAPABILITY_AUTH_PROFILE
             | CAPABILITY_DOWNLOAD_AUTH => {}
             _ => {
                 return Err(ManifestError::DisallowedCapability(cap.0.clone()));

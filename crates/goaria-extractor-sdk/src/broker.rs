@@ -244,10 +244,11 @@ impl HostBroker {
                     .unwrap_or_else(|| "register download auth failed".to_string()),
             });
         }
-        resp.download_auth_ref.ok_or_else(|| ExtractorError::HostError {
-            error_code: "invalid_response".to_string(),
-            message: "register_download_auth response missing download_auth_ref".to_string(),
-        })
+        resp.download_auth_ref
+            .ok_or_else(|| ExtractorError::HostError {
+                error_code: "invalid_response".to_string(),
+                message: "register_download_auth response missing download_auth_ref".to_string(),
+            })
     }
 
     /// Read the host's invocation-scoped Unix timestamp. Consumes one

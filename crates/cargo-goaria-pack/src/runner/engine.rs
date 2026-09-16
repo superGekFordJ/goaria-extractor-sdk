@@ -25,12 +25,18 @@ fn approximate_instruction_budget(timeout_millis: u64) -> u64 {
 
 /// Decode a fetch request body; failure yields the wire error response the
 /// host would return for malformed request JSON instead of a null result.
-fn decode_fetch_request(req_bytes: &[u8]) -> Result<HostHTTPFetchRequest, HostHTTPFetchResponse> {
-    serde_json::from_slice(req_bytes).map_err(|error| HostHTTPFetchResponse {
-        ok: false,
-        error_code: Some("invalid_request".to_string()),
-        message: Some(error.to_string()),
-        ..Default::default()
+// Err is boxed to keep the Result small; the wire error response struct is
+// larger than clippy's result_large_err threshold.
+fn decode_fetch_request(
+    req_bytes: &[u8],
+) -> Result<HostHTTPFetchRequest, Box<HostHTTPFetchResponse>> {
+    serde_json::from_slice(req_bytes).map_err(|error| {
+        Box::new(HostHTTPFetchResponse {
+            ok: false,
+            error_code: Some("invalid_request".to_string()),
+            message: Some(error.to_string()),
+            ..Default::default()
+        })
     })
 }
 
@@ -280,7 +286,7 @@ impl WasmEngine {
                         let resp = match budget.consume() {
                             Ok(()) => {
                                 caller.data_mut().budget = budget;
-                                resp
+                                *resp
                             }
                             Err(e) => HostHTTPFetchResponse {
                                 ok: false,
@@ -541,13 +547,13 @@ mod tests {
     use super::{
         approximate_instruction_budget, decode_fetch_request, decode_register_request,
         decode_status_request, decode_time_request, fetch_response_too_large_bytes,
-        redact_url_for_debug, register_response_too_large_bytes,
-        status_response_too_large_bytes, time_response_too_large_bytes,
+        redact_url_for_debug, register_response_too_large_bytes, status_response_too_large_bytes,
+        time_response_too_large_bytes,
     };
     use crate::runner::limits::MAX_HOST_IMPORT_RESPONSE_BYTES;
     use goaria_extractor_sdk::types::{
-        HostAuthProfileStatusResponse, HostHTTPFetchResponse,
-        HostRegisterDownloadAuthResponse, HostTimeResponse,
+        HostAuthProfileStatusResponse, HostHTTPFetchResponse, HostRegisterDownloadAuthResponse,
+        HostTimeResponse,
     };
 
     #[test]
@@ -602,10 +608,8 @@ mod tests {
         let err = decode_register_request(b"{]").unwrap_err();
         assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
         // unknown fields are rejected on the request DTO
-        let err = decode_register_request(
-            br#"{"kind":"bearer","token":"t","extra":1}"#,
-        )
-        .unwrap_err();
+        let err =
+            decode_register_request(br#"{"kind":"bearer","token":"t","extra":1}"#).unwrap_err();
         assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
         assert!(decode_register_request(br#"{"kind":"bearer","token":"t"}"#).is_ok());
 
@@ -614,14 +618,7 @@ mod tests {
         assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
         assert!(decode_time_request(b"{}").is_ok());
         // non-object payloads must not slide into the empty struct
-        for bad in [
-            &b"null"[..],
-            b"[]",
-            b"[{}]",
-            b"5",
-            br#""now""#,
-            b"",
-        ] {
+        for bad in [&b"null"[..], b"[]", b"[{}]", b"5", br#""now""#, b""] {
             let err = decode_time_request(bad).unwrap_err();
             assert!(!err.ok);
             assert_eq!(err.error_code.as_deref(), Some("invalid_request"));
@@ -634,9 +631,8 @@ mod tests {
             redact_url_for_debug("https://example.com/path"),
             "https://example.com/path"
         );
-        let redacted = redact_url_for_debug(
-            "https://example.com/path?token=secret123&other=value#frag",
-        );
+        let redacted =
+            redact_url_for_debug("https://example.com/path?token=secret123&other=value#frag");
         assert_eq!(redacted, "https://example.com/path?<redacted>#<redacted>");
         assert!(!redacted.contains("secret123"));
         assert!(!redacted.contains("other"));

@@ -342,9 +342,7 @@ fn test_extracted_item_download_auth_ref_and_omit_browser_context() {
         ..Default::default()
     };
     let json_str = serde_json::to_string(&item).unwrap();
-    assert!(json_str.contains(
-        r#""download_auth_ref":"dar-0123456789abcdef0123456789abcdef""#
-    ));
+    assert!(json_str.contains(r#""download_auth_ref":"dar-0123456789abcdef0123456789abcdef""#));
     let roundtrip: ExtractedItemRef = serde_json::from_str(&json_str).unwrap();
     assert_eq!(roundtrip, item);
 

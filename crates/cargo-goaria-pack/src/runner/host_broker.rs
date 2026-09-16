@@ -2494,7 +2494,10 @@ mod tests {
         );
         assert!(!resp.ok);
         assert_eq!(resp.error_code.as_deref(), Some("registry_full"));
-        assert_eq!(registry.registered_refs().len(), super::DOWNLOAD_AUTH_MAX_PER_INVOCATION);
+        assert_eq!(
+            registry.registered_refs().len(),
+            super::DOWNLOAD_AUTH_MAX_PER_INVOCATION
+        );
     }
 
     #[test]

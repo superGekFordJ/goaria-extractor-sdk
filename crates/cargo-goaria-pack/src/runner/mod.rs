@@ -143,7 +143,8 @@ impl ExtractorRunner {
 
     /// Execute `goaria_extract` against a target URL.
     pub fn extract(&self, url: &str) -> Result<ExtractOutput, RunnerError> {
-        self.extract_with_registrations(url).map(|(output, _)| output)
+        self.extract_with_registrations(url)
+            .map(|(output, _)| output)
     }
 
     /// Execute `goaria_extract` and also return the download-auth refs the
@@ -703,16 +704,14 @@ mod tests {
         ];
 
         for item in invalid_items {
-            assert!(
-                validate_extract_output(&ExtractOutput::single(item), &registry).is_err()
-            );
+            assert!(validate_extract_output(&ExtractOutput::single(item), &registry).is_err());
         }
     }
 
     #[test]
     fn download_auth_ref_must_have_been_registered_this_run() {
-        use crate::runner::host_broker::HostBroker;
         use crate::manifest::{Capability, Manifest, ResourceLimits, CAPABILITY_DOWNLOAD_AUTH};
+        use crate::runner::host_broker::HostBroker;
         use crate::runner::limits::HostCallBudget;
         use goaria_extractor_sdk::types::HostRegisterDownloadAuthRequest;
 
