@@ -40,7 +40,7 @@ cargo goaria-pack new <NAME> [OPTIONS]
 | `-p`, `--path <PATH>` | Path | `./<NAME>` | Target directory for the new pack project. |
 | `--sdk <SOURCE>` | `vendor` \| `git` \| `crates` | `vendor` | SDK dependency source. `vendor` embeds SDK sources into `vendor/`; `git` uses the GitHub repo (rust only); `crates` uses the crates.io version (rust only, placeholder until published). |
 | `--sdk-ref <REF>` | String | None | Git revision (commit SHA, tag, or branch) — only valid with `--sdk git`. |
-| `--sdk-path <DIR>` | Path | None | Local SDK package directory, overrides `--sdk`. Rust: dir containing the SDK `Cargo.toml` (needs `goaria-extractor-macro` sibling). Zig: dir containing `sdk/zig`'s `build.zig.zon` — contents are copied into `vendor/goaria_sdk/`. |
+| `--sdk-path <DIR>` | Path | None | Local SDK package directory, mutually exclusive with `--sdk`/`--sdk-ref`. Rust: dir containing the SDK `Cargo.toml` (needs `goaria-extractor-macro` sibling). Zig: dir containing `sdk/zig`'s `build.zig.zon` — contents are copied into `vendor/goaria_sdk/`. |
 
 **Scaffolded Structure**:
 - **Rust (`--lang rust`)**: `Cargo.toml`, `manifest.json`, `src/lib.rs`, `.gitignore`; with `--sdk vendor` also `vendor/README.md`, `vendor/goaria-extractor-sdk/` and `vendor/goaria-extractor-macro/` (flattened standalone manifests — commit `vendor/`, it is never gitignored). Generated dep: `goaria-extractor-sdk = { path = "vendor/goaria-extractor-sdk" }`.
