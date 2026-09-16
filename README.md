@@ -80,6 +80,7 @@ cargo goaria-pack --version
 cargo goaria-pack new my-extractor --lang rust
 cd my-extractor
 ```
+The SDK sources are vendored into `vendor/` by default so the project builds standalone; use `--sdk git` to depend on the GitHub repo instead.
 
 ### 2. Implement URL Matching & Extraction
 Edit `src/lib.rs` to define pattern matching and artifact extraction rules using the Rust SDK.

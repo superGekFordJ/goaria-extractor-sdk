@@ -21,6 +21,7 @@ flowchart LR
 cargo goaria-pack new my-extractor --lang rust
 cd my-extractor
 ```
+By default (`--sdk vendor`), the SDK sources are embedded into `vendor/` so the project builds standalone. Alternatives: `--sdk git [--sdk-ref <REF>]` to depend on the GitHub repository, `--sdk crates` for the crates.io version, or `--sdk-path <DIR>` to point at a local SDK checkout.
 
 ### Step 2: Configure Permissions (`manifest.json`)
 Declare granular capabilities and domain rules matching your target site.
@@ -64,10 +65,19 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-goaria-extractor-sdk = "0.1.0"
+goaria-extractor-sdk = { path = "vendor/goaria-extractor-sdk" }
 serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 ```
+
+The `goaria-extractor-sdk` dependency line depends on the `--sdk` source chosen at scaffold time:
+
+| Mode | Generated dependency |
+| :--- | :--- |
+| `--sdk vendor` (default) | `goaria-extractor-sdk = { path = "vendor/goaria-extractor-sdk" }` — SDK + proc-macro crates are copied into `vendor/` with flattened standalone manifests; commit `vendor/` to version control. |
+| `--sdk git [--sdk-ref <REF>]` | `goaria-extractor-sdk = { git = "https://github.com/superGekFordJ/goaria-extractor-sdk"[, rev = "<REF>"] }` |
+| `--sdk crates` | `goaria-extractor-sdk = "0.1.0"` — placeholder until the crate is published. |
+| `--sdk-path <DIR>` | `goaria-extractor-sdk = { path = "<absolute DIR>" }` — local SDK checkout. |
 
 ### 2.2 Implementing the `Extractor` Trait
 
@@ -126,7 +136,9 @@ Notice that extractors never handle raw tokens, cookies, or secrets. Instead, th
 
 ## 3. Zig Extractor Authoring Guide
 
-### 3.1 Build Configuration (`build.zig`)
+### 3.1 Build Configuration (`build.zig` + `build.zig.zon`)
+
+Scaffolded zig packs consume the vendored `goaria_sdk` package via a `.path` dependency:
 
 ```zig
 const std = @import("std");
@@ -140,67 +152,92 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSmall,
     });
 
-    const lib = b.addSharedLibrary(.{
-        .name = "payload",
-        .root_source_file = b.path("src/main.zig"),
+    const sdk_dep = b.dependency("goaria_sdk", .{
         .target = target,
         .optimize = optimize,
     });
+    const sdk_mod = sdk_dep.module("goaria_sdk");
 
-    lib.rdynamic = true;
-    lib.entry = .disabled;
+    const wasm = b.addExecutable(.{
+        .name = "my_extractor",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = true,
+            .imports = &.{ .{ .name = "goaria_sdk", .module = sdk_mod } },
+        }),
+    });
 
-    b.installArtifact(lib);
+    wasm.entry = .disabled;
+    wasm.rdynamic = true;
+
+    b.installArtifact(wasm);
 }
 ```
+
+```zig
+// build.zig.zon
+.{
+    .name = .my_extractor,
+    .version = "0.1.0",
+    .fingerprint = 0x0123456789abcdef,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .goaria_sdk = .{
+            .path = "vendor/goaria_sdk",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "manifest.json",
+        "src",
+    },
+}
+```
+
+Zig package names must be bare identifiers; the CLI normalizes hyphens to underscores and falls back to a `pack_` prefix for names that would collide with a zig keyword or start with a digit. `--sdk git`/`--sdk crates` are not supported for zig — use the default vendored copy or `--sdk-path <DIR>` (which copies the SDK package into `vendor/goaria_sdk/`).
 
 ### 3.2 Extractor Implementation (`src/main.zig`)
 
 ```zig
 const std = @import("std");
+const goaria = @import("goaria_sdk");
 
-var allocator = std.heap.page_allocator;
+pub const MyExtractor = struct {
+    pub fn matchUrl(allocator: std.mem.Allocator, input: goaria.MatchInput) !goaria.MatchOutput {
+        _ = allocator;
+        if (std.mem.indexOf(u8, input.url, "fixture.invalid") != null) {
+            return goaria.MatchOutput.matchedResult()
+                .withConfidence(100)
+                .withReason("matches fixture.invalid domain");
+        }
+        return goaria.MatchOutput.unmatchedResult();
+    }
 
-inline fn packResult(ptr: u32, len: u32) i64 {
-    const val = (@as(u64, ptr) << 32) | @as(u64, len);
-    return @bitCast(val);
-}
+    pub fn extract(allocator: std.mem.Allocator, input: goaria.ExtractInput) !goaria.ExtractOutput {
+        if (std.mem.indexOf(u8, input.url, "fixture.invalid") == null) {
+            return goaria.ExtractOutput.empty();
+        }
 
-export fn goaria_abi_version() callconv(.c) i32 {
-    return 1;
-}
+        const item = goaria.ExtractedItemRef{
+            .id = "item-001",
+            .url = input.url,
+            .filename = "download.bin",
+            .mime_type = "application/octet-stream",
+        };
 
-export fn goaria_alloc(len: i32) callconv(.c) i32 {
-    if (len <= 0) return 0;
-    const slice = allocator.alloc(u8, @intCast(len)) catch return 0;
-    return @intCast(@intFromPtr(slice.ptr));
-}
+        return try goaria.ExtractOutput.single(allocator, item);
+    }
+};
 
-export fn goaria_free(ptr: i32, len: i32) callconv(.c) void {
-    if (ptr <= 0 or len <= 0) return;
-    const u_ptr: usize = @as(usize, @as(u32, @bitCast(ptr)));
-    const slice: []u8 = @as([*]u8, @ptrFromInt(u_ptr))[0..@as(usize, @as(u32, @bitCast(len)))];
-    allocator.free(slice);
-}
-
-export fn goaria_match(ptr: i32, len: i32) callconv(.c) i64 {
-    _ = ptr;
-    _ = len;
-    const result = "{\"matched\":true,\"confidence\":100,\"reason\":\"matches fixture domain\"}";
-    const out_slice = allocator.alloc(u8, result.len) catch return 0;
-    @memcpy(out_slice, result);
-    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
-}
-
-export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
-    _ = ptr;
-    _ = len;
-    const result = "{\"items\":[{\"id\":\"item-001\",\"url\":\"https://fixture.invalid/file.bin\",\"filename\":\"file.bin\"}]}";
-    const out_slice = allocator.alloc(u8, result.len) catch return 0;
-    @memcpy(out_slice, result);
-    return packResult(@truncate(@intFromPtr(out_slice.ptr)), @intCast(result.len));
+comptime {
+    goaria.exportExtractor(MyExtractor);
 }
 ```
+
+`goaria.exportExtractor` generates the five ABI v1 exports (`goaria_abi_version`, `goaria_alloc`, `goaria_free`, `goaria_match`, `goaria_extract`) plus guest memory management.
 
 ---
 
@@ -208,7 +245,7 @@ export fn goaria_extract(ptr: i32, len: i32) callconv(.c) i64 {
 
 | Command | Syntax | Description |
 | :--- | :--- | :--- |
-| `new` | `cargo goaria-pack new <NAME> [--lang rust\|zig] [--path <PATH>]` | Scaffolds a new extractor pack project. |
+| `new` | `cargo goaria-pack new <NAME> [--lang rust\|zig] [--path <PATH>] [--sdk vendor\|git\|crates] [--sdk-ref <REF>] [--sdk-path <DIR>]` | Scaffolds a new extractor pack project (default: vendored SDK sources). |
 | `build` | `cargo goaria-pack build [--project-dir <DIR>] [--release]` | Compiles the extractor WebAssembly module. |
 | `check` | `cargo goaria-pack check [--project-dir <DIR>] [--wasm <PATH>] [--manifest <PATH>]` | Statically analyzes WASM exports, imports, and validates manifest.json. |
 | `test` | `cargo goaria-pack test [--project-dir <DIR>] [--live] [--fixtures <DIR>]` | Executes unit test fixtures in the local WASM interpreter sandbox. |
