@@ -1,5 +1,5 @@
 use crate::scaffold::sdk_assets::{
-    zig_fingerprint, zig_package_name, zig_struct_name, ZIG_SDK_FILES,
+    zig_fingerprint, zig_package_name, zig_struct_name, LICENSE_FILES, ZIG_SDK_FILES,
 };
 use crate::scaffold::{copy_dir_recursive, ScaffoldError, SdkSpec};
 use std::path::Path;
@@ -15,20 +15,25 @@ fn write_zig_sdk(target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> 
                 }
                 std::fs::write(&dest, file.contents)?;
             }
-            Ok(())
         }
-        SdkSpec::Path(dir) => copy_dir_recursive(dir, &vendor_dir),
-        other => Err(ScaffoldError::UnsupportedSdkSource {
-            sdk: match other {
-                SdkSpec::Git { .. } => "git",
-                SdkSpec::Crates => "crates",
-                _ => "unknown",
-            }
-            .to_string(),
-            lang: "zig".to_string(),
-            reason: "zig packs require vendored or local-path SDK sources".to_string(),
-        }),
+        SdkSpec::Path(dir) => copy_dir_recursive(dir, &vendor_dir)?,
+        other => {
+            return Err(ScaffoldError::UnsupportedSdkSource {
+                sdk: match other {
+                    SdkSpec::Git { .. } => "git",
+                    SdkSpec::Crates => "crates",
+                    _ => "unknown",
+                }
+                .to_string(),
+                lang: "zig".to_string(),
+                reason: "zig packs require vendored or local-path SDK sources".to_string(),
+            })
+        }
     }
+    for file in LICENSE_FILES {
+        std::fs::write(vendor_dir.join(file.rel_path), file.contents)?;
+    }
+    Ok(())
 }
 
 pub fn generate(name: &str, target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> {

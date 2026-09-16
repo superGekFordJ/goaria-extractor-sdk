@@ -1,6 +1,6 @@
 use crate::scaffold::sdk_assets::{
-    EmbeddedFile, EMBEDDED_SDK_VERSION, RUST_MACRO_FILES, RUST_SDK_FILES, SDK_GIT_URL,
-    VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
+    EmbeddedFile, EMBEDDED_SDK_VERSION, LICENSE_FILES, RUST_MACRO_FILES, RUST_SDK_FILES,
+    SDK_GIT_URL, VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
 };
 use crate::scaffold::{ScaffoldError, SdkSpec};
 use std::path::Path;
@@ -42,6 +42,7 @@ fn write_vendored_sdk(target_dir: &Path) -> Result<(), ScaffoldError> {
 
     let sdk_dir = vendor_dir.join("goaria-extractor-sdk");
     write_embedded_tree(&sdk_dir, RUST_SDK_FILES)?;
+    write_embedded_tree(&sdk_dir, LICENSE_FILES)?;
     std::fs::write(
         sdk_dir.join("Cargo.toml"),
         VENDORED_SDK_CARGO_TOML.replace("{version}", EMBEDDED_SDK_VERSION),
@@ -49,6 +50,7 @@ fn write_vendored_sdk(target_dir: &Path) -> Result<(), ScaffoldError> {
 
     let macro_dir = vendor_dir.join("goaria-extractor-macro");
     write_embedded_tree(&macro_dir, RUST_MACRO_FILES)?;
+    write_embedded_tree(&macro_dir, LICENSE_FILES)?;
     std::fs::write(
         macro_dir.join("Cargo.toml"),
         VENDORED_MACRO_CARGO_TOML.replace("{version}", EMBEDDED_SDK_VERSION),

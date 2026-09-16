@@ -82,6 +82,21 @@ pub const ZIG_SDK_FILES: &[EmbeddedFile] = &[
     },
 ];
 
+// License texts dropped into every vendored SDK package so redistributed
+// copies retain the notices MIT/Apache-2.0 require. Lives outside the
+// source-tree tables above: the files sit at the repo root, not inside
+// crates/goaria-extractor-sdk or sdk/zig.
+pub const LICENSE_FILES: &[EmbeddedFile] = &[
+    EmbeddedFile {
+        rel_path: "LICENSE-MIT",
+        contents: include_str!("../../../../LICENSE-MIT"),
+    },
+    EmbeddedFile {
+        rel_path: "LICENSE-APACHE",
+        contents: include_str!("../../../../LICENSE-APACHE"),
+    },
+];
+
 pub const VENDORED_SDK_CARGO_TOML: &str = r#"[package]
 name = "goaria-extractor-sdk"
 version = "{version}"

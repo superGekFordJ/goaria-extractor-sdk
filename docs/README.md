@@ -16,6 +16,13 @@ flowchart LR
     F --> G[".pack.zip + .lock.json"]
 ```
 
+### Step 0: Install the CLI
+
+- **Prebuilt binary** (no Rust toolchain needed): download `cargo-goaria-pack-<version>-<target>` from [GitHub Releases](https://github.com/superGekFordJ/goaria-extractor-sdk/releases) and place it on your `PATH`.
+- **From source**: `cargo install --path crates/cargo-goaria-pack`.
+
+All examples below use the `cargo goaria-pack` form; standalone-binary users run `cargo-goaria-pack` directly — the interface is identical.
+
 ### Step 1: Initialize Project
 ```bash
 cargo goaria-pack new my-extractor --lang rust

@@ -1,10 +1,9 @@
 # GoAria Extractor SDK
 
-[![CI](https://github.com/goaria/goaria-extractor-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/goaria/goaria-extractor-sdk/actions/workflows/ci.yml)
 [![ABI Version](https://img.shields.io/badge/ABI-v1-blue.svg)](docs/abi_v1_specification.md)
 [![Rust](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
 [![Zig](https://img.shields.io/badge/Zig-0.16.0-yellow.svg)](https://ziglang.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-green.svg)](LICENSE-MIT)
 
 The official software development kit and toolchain for authoring, testing, and packaging sandboxed WebAssembly link extractors for the **GoAria** download manager ecosystem.
 
@@ -57,9 +56,37 @@ flowchart TB
 
 ---
 
-## 🚀 Quick Installation
+## 🚀 Installation & Prerequisites
 
-Install the CLI toolchain via Cargo:
+### Step 0: Choose Your Toolchain
+
+The CLI drives your pack's language toolchain, so install the one matching your `--lang` choice:
+
+**Option A — Zig (recommended on Windows for straightforward extractors)**
+
+A Zig pack needs nothing but the Zig binary itself — no C/C++ build tools and no Rust toolchain:
+
+```powershell
+winget install zig.zig    # or: scoop install zig
+zig version               # must report 0.16.x
+```
+
+**Option B — Rust (required for `--lang rust`)**
+
+```bash
+# Install via https://rustup.rs, then add the WASM target:
+rustup target add wasm32-unknown-unknown
+```
+
+On Windows, Rust packs additionally require **Visual Studio Build Tools** with the *"Desktop development with C++"* workload (MSVC linker + Windows SDK): proc macros compile for the host, so a host linker is needed even though the final artifact is WebAssembly. On Linux install `gcc`/`clang`; on macOS install the Xcode Command Line Tools.
+
+### Install the CLI
+
+**Prebuilt binary** — no Rust toolchain required:
+
+Download the `cargo-goaria-pack-<version>-<target>` archive for your platform from [GitHub Releases](https://github.com/superGekFordJ/goaria-extractor-sdk/releases), verify it against `SHA256SUMS.txt`, unpack it, and place `cargo-goaria-pack` (`cargo-goaria-pack.exe` on Windows) on your `PATH`. On macOS, clear the quarantine attribute after downloading: `xattr -d com.apple.quarantine cargo-goaria-pack`.
+
+**From source** — requires a Rust toolchain:
 
 ```bash
 cargo install --path crates/cargo-goaria-pack
@@ -68,8 +95,10 @@ cargo install --path crates/cargo-goaria-pack
 Verify the installation:
 
 ```bash
-cargo goaria-pack --version
+cargo-goaria-pack --version
 ```
+
+Once on `PATH`, the binary works directly as `cargo-goaria-pack <COMMAND>` and — when Cargo is also installed — as the `cargo goaria-pack <COMMAND>` subcommand. Both forms are equivalent; the docs use the `cargo goaria-pack` spelling.
 
 ---
 

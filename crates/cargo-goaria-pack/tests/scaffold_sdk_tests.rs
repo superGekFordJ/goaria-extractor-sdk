@@ -64,6 +64,14 @@ fn test_rust_vendor_scaffolds_flattened_sdk() {
         .join("vendor/goaria-extractor-macro/src/lib.rs")
         .exists());
     assert!(project_dir.join("vendor/README.md").exists());
+    for dir in ["goaria-extractor-sdk", "goaria-extractor-macro"] {
+        for lic in ["LICENSE-MIT", "LICENSE-APACHE"] {
+            assert!(
+                project_dir.join(format!("vendor/{dir}/{lic}")).exists(),
+                "missing vendored {dir}/{lic}"
+            );
+        }
+    }
     assert!(!project_dir
         .join("vendor/goaria-extractor-sdk/tests")
         .exists());
@@ -152,6 +160,14 @@ fn test_zig_vendor_scaffolds_goaria_sdk() {
             .exists());
     }
     assert!(project_dir.join("vendor/goaria_sdk/build.zig").exists());
+    for lic in ["LICENSE-MIT", "LICENSE-APACHE"] {
+        assert!(
+            project_dir
+                .join(format!("vendor/goaria_sdk/{lic}"))
+                .exists(),
+            "missing vendored goaria_sdk/{lic}"
+        );
+    }
     assert!(!project_dir.join("vendor/goaria_sdk/.zig-cache").exists());
 
     let zon = read(&project_dir.join("build.zig.zon"));

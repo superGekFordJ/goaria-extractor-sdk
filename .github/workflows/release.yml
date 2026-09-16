@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify tag matches workspace version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate_ver=$(awk '/^\[workspace\.package\]/{f=1} f && /^version *=/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+          if [ "$tag" != "$crate_ver" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match workspace version ${crate_ver} in Cargo.toml"
+            exit 1
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: cargo-goaria-pack.exe
+            apt_deps: ''
+            linker_env: ''
+            smoke: true
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            bin: cargo-goaria-pack
+            apt_deps: musl-tools
+            linker_env: ''
+            smoke: true
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            bin: cargo-goaria-pack
+            apt_deps: gcc-aarch64-linux-gnu
+            linker_env: CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+            smoke: false
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            bin: cargo-goaria-pack
+            apt_deps: ''
+            linker_env: ''
+            smoke: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross-compilation dependencies
+        if: matrix.apt_deps != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt_deps }}
+
+      - name: Configure cross linker
+        if: matrix.linker_env != ''
+        run: echo "${{ matrix.linker_env }}" >> "$GITHUB_ENV"
+
+      - name: Build CLI
+        run: cargo build --release -p cargo-goaria-pack --target ${{ matrix.target }}
+
+      - name: Smoke test binary
+        if: matrix.smoke
+        shell: bash
+        run: "target/${{ matrix.target }}/release/${{ matrix.bin }} --version"
+
+      - name: Package archive (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="cargo-goaria-pack-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" README.md "dist/$name/"
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+
+      - name: Package archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "cargo-goaria-pack-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$name" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.bin }}", "README.md" -Destination "dist/$name"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          args=()
+          case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease);; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --title "cargo-goaria-pack $GITHUB_REF_NAME" \
+            --generate-notes \
+            "${args[@]}" \
+            dist/*

@@ -14,16 +14,19 @@ This guide provides the complete architectural mental model, type contracts, run
 The `cargo-goaria-pack` CLI is the official developer toolkit for GoAria extractor packs.
 
 ### Invocation Methods
+- Prebuilt release binary on `PATH` (from GitHub Releases, no Rust toolchain needed):
+  ```bash
+  cargo-goaria-pack <COMMAND> [OPTIONS]
+  ```
 - As a Cargo subcommand (recommended after `cargo install --path crates/cargo-goaria-pack`):
   ```bash
   cargo goaria-pack <COMMAND> [OPTIONS]
   ```
-- Direct executable or development invocation:
+- Development invocation via workspace:
   ```bash
-  cargo-goaria-pack goaria-pack <COMMAND> [OPTIONS]
-  # Or via workspace:
-  cargo run -p cargo-goaria-pack -- goaria-pack <COMMAND> [OPTIONS]
+  cargo run -p cargo-goaria-pack -- <COMMAND> [OPTIONS]
   ```
+  (A leading `goaria-pack` argument is also accepted and stripped, matching how Cargo invokes subcommands.)
 
 ---
 
