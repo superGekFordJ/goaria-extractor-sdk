@@ -12,3 +12,6 @@ Cargo.lock
 
 # Local private packs
 packs/
+
+# Internal planning docs (local only)
+docs/plan/
