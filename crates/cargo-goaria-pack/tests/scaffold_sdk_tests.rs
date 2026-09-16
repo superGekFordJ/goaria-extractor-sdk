@@ -635,72 +635,128 @@ fn test_zig_zon_name_must_not_be_a_comment() {
 }
 
 #[test]
+fn test_zig_zon_single_line_name_accepted() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = make_fake_zig_sdk(temp.path());
+    std::fs::write(
+        fake.join("build.zig.zon"),
+        ".{ .name = .goaria_sdk, .version = \"0.1.0\" }
+",
+    )
+    .unwrap();
+    assert!(resolve_sdk_spec(Language::Zig, None, None, Some(fake)).is_ok());
+}
+
+#[test]
 fn test_vendored_manifest_dep_sets_match_real_crates() {
     use cargo_goaria_pack::scaffold::sdk_assets::{
         VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
     };
 
+    fn dep_table(spec: &toml::Value) -> toml::Table {
+        match spec {
+            toml::Value::String(version) => {
+                let mut t = toml::Table::new();
+                t.insert("version".to_string(), toml::Value::String(version.clone()));
+                t
+            }
+            toml::Value::Table(t) => t.clone(),
+            other => panic!("unsupported dep spec: {other}"),
+        }
+    }
+
+    // Compares a real crate manifest's [dependencies] against a vendored
+    // template; workspace-inherited deps resolve against the root table and
+    // crate-level keys (features, optional, ...) are merged on top.
+    fn dep_drift(
+        label: &str,
+        real_src: &str,
+        vendored_src: &str,
+        ws_deps: &toml::Table,
+    ) -> Vec<String> {
+        let real: toml::Value = toml::from_str(real_src).unwrap();
+        let vendored: toml::Value = toml::from_str(vendored_src).unwrap();
+        let real_deps = real["dependencies"].as_table().unwrap();
+        let vendored_deps = vendored["dependencies"].as_table().unwrap();
+        let mut drift = Vec::new();
+
+        for (dep, real_spec) in real_deps {
+            let Some(vendored_spec) = vendored_deps.get(dep.as_str()) else {
+                drift.push(format!("{label}: dep {dep} missing from vendored manifest"));
+                continue;
+            };
+            let vendored_table = dep_table(vendored_spec);
+            let mut resolved = if real_spec.get("workspace").and_then(|w| w.as_bool()) == Some(true)
+            {
+                ws_deps
+                    .get(dep.as_str())
+                    .map(dep_table)
+                    .unwrap_or_else(|| panic!("{label}: {dep} missing from workspace deps"))
+            } else {
+                dep_table(real_spec)
+            };
+            for (k, v) in real_spec.as_table().unwrap() {
+                if k != "workspace" {
+                    resolved.insert(k.clone(), v.clone());
+                }
+            }
+            for key in ["version", "default-features", "features", "optional"] {
+                match (resolved.get(key), vendored_table.get(key)) {
+                    (Some(e), Some(a)) if e != a => {
+                        drift.push(format!("{label}: dep {dep} key {key} drift"))
+                    }
+                    (Some(_), None) => drift.push(format!("{label}: dep {dep} missing key {key}")),
+                    (None, Some(_)) => {
+                        drift.push(format!("{label}: dep {dep} unexpectedly sets {key}"))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for dep in vendored_deps.keys() {
+            if !real_deps.contains_key(dep) {
+                drift.push(format!(
+                    "{label}: vendored manifest carries extra dep {dep}"
+                ));
+            }
+        }
+        drift
+    }
+
     let root: toml::Value = toml::from_str(&read(&workspace_root().join("Cargo.toml"))).unwrap();
     let ws_pkg = &root["workspace"]["package"];
-    let ws_deps = &root["workspace"]["dependencies"];
+    let ws_deps = root["workspace"]["dependencies"].as_table().unwrap();
+    let version = ws_pkg["version"].as_str().unwrap();
 
-    let check = |crate_dir: &str, template: &str| {
-        let real: toml::Value = toml::from_str(&read(
+    for (crate_dir, template) in [
+        ("goaria-extractor-sdk", VENDORED_SDK_CARGO_TOML),
+        ("goaria-extractor-macro", VENDORED_MACRO_CARGO_TOML),
+    ] {
+        let real_src = read(
             &workspace_root()
                 .join("crates")
                 .join(crate_dir)
                 .join("Cargo.toml"),
-        ))
-        .unwrap();
-        let vendored: toml::Value =
-            toml::from_str(&template.replace("{version}", ws_pkg["version"].as_str().unwrap()))
-                .unwrap();
-        let vendored_deps = vendored["dependencies"].as_table().unwrap();
+        );
+        let vendored_src = template.replace("{version}", version);
+        let vendored: toml::Value = toml::from_str(&vendored_src).unwrap();
 
-        // Edition tracks the workspace package edition.
         assert_eq!(
             vendored["package"]["edition"].as_str().unwrap(),
             ws_pkg["edition"].as_str().unwrap(),
             "{crate_dir}: edition drift"
         );
+        assert!(
+            dep_drift(crate_dir, &real_src, &vendored_src, ws_deps).is_empty(),
+            "{crate_dir}: {}",
+            dep_drift(crate_dir, &real_src, &vendored_src, ws_deps).join("; ")
+        );
+    }
 
-        for (dep, real_spec) in real["dependencies"].as_table().unwrap() {
-            let vendored_spec = vendored_deps
-                .get(dep.as_str())
-                .unwrap_or_else(|| panic!("{crate_dir}: dep {dep} missing from vendored manifest"));
-            // Resolve workspace-inherited deps against the root table.
-            let resolved = if real_spec.get("workspace").and_then(|w| w.as_bool()) == Some(true) {
-                ws_deps.get(dep.as_str()).unwrap_or_else(|| {
-                    panic!("{crate_dir}: {dep} missing from workspace dependencies")
-                })
-            } else {
-                real_spec
-            };
-            for key in ["version", "default-features", "features"] {
-                let expected = resolved.get(key);
-                let actual = vendored_spec.get(key);
-                match expected {
-                    Some(exp) => assert_eq!(
-                        actual.expect("missing key"),
-                        exp,
-                        "{crate_dir}: dep {dep} key {key} drift"
-                    ),
-                    None => assert!(
-                        actual.is_none(),
-                        "{crate_dir}: dep {dep} unexpectedly sets {key}"
-                    ),
-                }
-            }
-        }
-        let real_deps = real["dependencies"].as_table().unwrap();
-        for dep in vendored_deps.keys() {
-            assert!(
-                real_deps.contains_key(dep),
-                "{crate_dir}: vendored manifest carries extra dep {dep}"
-            );
-        }
-    };
-
-    check("goaria-extractor-sdk", VENDORED_SDK_CARGO_TOML);
-    check("goaria-extractor-macro", VENDORED_MACRO_CARGO_TOML);
+    // A crate-level extra key on a workspace dep must surface as drift.
+    let fake_real = "[dependencies]
+serde = { workspace = true, features = [\"rc\"] }
+";
+    let vendored_src = VENDORED_SDK_CARGO_TOML.replace("{version}", version);
+    assert!(!dep_drift("fake", fake_real, &vendored_src, ws_deps).is_empty());
 }

@@ -114,7 +114,7 @@ fn validate_zig_sdk_path(dir: &Path) -> Result<(), ScaffoldError> {
             format!("missing readable build.zig.zon at '{}'", zon.display()),
         )
     })?;
-    let name_re = regex::Regex::new(r"(?m)^\s*\.name\s*=\s*\.goaria_sdk\b").unwrap();
+    let name_re = regex::Regex::new(r"(?m)(?:^|[{,])\s*\.name\s*=\s*\.goaria_sdk\b").unwrap();
     if !name_re.is_match(&contents) {
         return Err(ScaffoldError::InvalidSdkPath(
             display,
