@@ -28,6 +28,10 @@ pub enum ScaffoldError {
     SdkPathContainsTarget(String, String),
     #[error("invalid --sdk-ref '{0}': must be non-empty and free of quotes, backslashes, whitespace, or control characters")]
     InvalidSdkRef(String),
+    #[error("pack name '{0}' collides with a vendored SDK crate name; choose a different name")]
+    ReservedPackName(String),
+    #[error("'{0}' already exists and is not a directory")]
+    NotADirectory(String),
 }
 
 #[derive(Debug, Clone)]
@@ -82,13 +86,20 @@ fn validate_rust_sdk_path(dir: &Path) -> Result<(), ScaffoldError> {
         .join("..")
         .join("goaria-extractor-macro")
         .join("Cargo.toml");
-    if !macro_toml.is_file() {
-        return Err(ScaffoldError::InvalidSdkPath(
+    let macro_manifest = std::fs::read_to_string(&macro_toml).map_err(|_| {
+        ScaffoldError::InvalidSdkPath(
             dir.display().to_string(),
             format!(
                 "sibling goaria-extractor-macro crate not found at '{}'",
                 macro_toml.display()
             ),
+        )
+    })?;
+    let macro_re = regex::Regex::new(r#"(?m)^\s*name\s*=\s*"goaria-extractor-macro""#).unwrap();
+    if !macro_re.is_match(&macro_manifest) {
+        return Err(ScaffoldError::InvalidSdkPath(
+            dir.display().to_string(),
+            "sibling Cargo.toml does not declare name = \"goaria-extractor-macro\"".to_string(),
         ));
     }
     Ok(())
@@ -103,7 +114,7 @@ fn validate_zig_sdk_path(dir: &Path) -> Result<(), ScaffoldError> {
             format!("missing readable build.zig.zon at '{}'", zon.display()),
         )
     })?;
-    let name_re = regex::Regex::new(r"(?m)\.name\s*=\s*\.goaria_sdk\b").unwrap();
+    let name_re = regex::Regex::new(r"(?m)^\s*\.name\s*=\s*\.goaria_sdk\b").unwrap();
     if !name_re.is_match(&contents) {
         return Err(ScaffoldError::InvalidSdkPath(
             display,
@@ -229,14 +240,15 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ScaffoldE
     let canon_dst = canonical_loose(dst);
     if canon_dst.starts_with(&canon_src) {
         return Err(ScaffoldError::SdkPathContainsTarget(
-            src.display().to_string(),
-            dst.display().to_string(),
+            forward_slash_path(&canon_src),
+            forward_slash_path(dst),
         ));
     }
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         let name = entry.file_name();
         let file_type = entry.file_type()?;
+        // .git files (worktrees) and symlinks/junctions are skipped, not copied.
         if name == ".git" || file_type.is_symlink() {
             continue;
         }
@@ -267,9 +279,17 @@ pub fn scaffold_project(
 ) -> Result<(), ScaffoldError> {
     validate_pack_name(name)?;
 
+    if lang == Language::Rust && matches!(name, "goaria-extractor-sdk" | "goaria-extractor-macro") {
+        return Err(ScaffoldError::ReservedPackName(name.to_string()));
+    }
+
     let created = !target_dir.exists();
     if created {
         std::fs::create_dir_all(target_dir)?;
+    } else if !target_dir.is_dir() {
+        return Err(ScaffoldError::NotADirectory(
+            target_dir.display().to_string(),
+        ));
     } else {
         let mut entries = std::fs::read_dir(target_dir)?;
         if entries.next().is_some() {

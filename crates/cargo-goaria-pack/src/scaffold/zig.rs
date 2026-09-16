@@ -32,6 +32,9 @@ fn write_zig_sdk(target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> 
 }
 
 pub fn generate(name: &str, target_dir: &Path, sdk: &SdkSpec) -> Result<(), ScaffoldError> {
+    // Vendor/copy the SDK first so a rejected source leaves no scaffold residue.
+    write_zig_sdk(target_dir, sdk)?;
+
     let src_dir = target_dir.join("src");
     std::fs::create_dir_all(&src_dir)?;
 
@@ -175,8 +178,6 @@ dist/
 *.lock.json
 "#;
     std::fs::write(target_dir.join(".gitignore"), gitignore)?;
-
-    write_zig_sdk(target_dir, sdk)?;
 
     Ok(())
 }

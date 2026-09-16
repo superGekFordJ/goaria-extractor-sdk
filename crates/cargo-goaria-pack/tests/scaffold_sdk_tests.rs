@@ -366,7 +366,11 @@ fn make_fake_zig_sdk(root: &Path) -> PathBuf {
     std::fs::write(dir.join("build.zig"), "pub fn build() {}").unwrap();
     std::fs::write(
         dir.join("build.zig.zon"),
-        ".{ .name = .goaria_sdk, .version = \"0.1.0\" }",
+        ".{
+    .name = .goaria_sdk,
+    .version = \"0.1.0\"
+}
+",
     )
     .unwrap();
     std::fs::write(dir.join("src").join("root.zig"), "pub const x = 1;").unwrap();
@@ -544,4 +548,159 @@ fn test_embedded_sdk_tables_cover_source_trees() {
         ZIG_SDK_FILES,
         None,
     );
+}
+
+#[test]
+fn test_reserved_pack_names_rejected_for_rust() {
+    for name in ["goaria-extractor-sdk", "goaria-extractor-macro"] {
+        let temp = tempfile::tempdir().unwrap();
+        let project_dir = temp.path().join(name);
+        let res = scaffold_project(name, Language::Rust, &project_dir, &SdkSpec::Vendor);
+        assert!(
+            matches!(res, Err(ScaffoldError::ReservedPackName(_))),
+            "expected ReservedPackName for {name}, got {res:?}"
+        );
+        assert!(!project_dir.exists());
+    }
+    // Same names are fine for zig — no crates.io-style name collision there.
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("zig_sdk_named_pack");
+    assert!(scaffold_project(
+        "goaria-extractor-sdk",
+        Language::Zig,
+        &project_dir,
+        &SdkSpec::Vendor,
+    )
+    .is_ok());
+}
+
+#[test]
+fn test_zig_sdk_path_existing_empty_dir_leaves_no_residue() {
+    let temp = tempfile::tempdir().unwrap();
+    let sdk_dir = make_fake_zig_sdk(temp.path());
+    // Pre-existing empty target inside the source dir.
+    let project_dir = sdk_dir.join("new_pack");
+    std::fs::create_dir_all(&project_dir).unwrap();
+
+    let spec = resolve_sdk_spec(Language::Zig, None, None, Some(sdk_dir)).unwrap();
+    let res = scaffold_project("new-pack", Language::Zig, &project_dir, &spec);
+    assert!(matches!(res, Err(ScaffoldError::SdkPathContainsTarget(..))));
+    // Pre-existing dir stays, but must be left empty — no partial scaffold.
+    assert!(project_dir.exists());
+    assert!(std::fs::read_dir(&project_dir).unwrap().next().is_none());
+}
+
+#[test]
+fn test_target_path_is_file_errors_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let file_path = temp.path().join("a-file");
+    std::fs::write(&file_path, "not a dir").unwrap();
+    let res = scaffold_project("a-file", Language::Rust, &file_path, &SdkSpec::Vendor);
+    assert!(matches!(res, Err(ScaffoldError::NotADirectory(_))));
+}
+
+#[test]
+fn test_generated_rust_manifest_detaches_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_dir = temp.path().join("inner").join("detached-pack");
+    scaffold_project(
+        "detached-pack",
+        Language::Rust,
+        &project_dir,
+        &SdkSpec::Vendor,
+    )
+    .unwrap();
+    let cargo_toml = read(&project_dir.join("Cargo.toml"));
+    assert!(cargo_toml.lines().any(|l| l.trim() == "[workspace]"));
+}
+
+#[test]
+fn test_zig_zon_name_must_not_be_a_comment() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = temp.path().join("commented_zig");
+    std::fs::create_dir_all(fake.join("src")).unwrap();
+    std::fs::write(fake.join("build.zig"), "pub fn build() {}").unwrap();
+    std::fs::write(fake.join("src").join("root.zig"), "").unwrap();
+    std::fs::write(
+        fake.join("build.zig.zon"),
+        ".{
+    // .name = .goaria_sdk
+    .name = .other_pkg
+}
+",
+    )
+    .unwrap();
+    let res = resolve_sdk_spec(Language::Zig, None, None, Some(fake));
+    assert!(matches!(res, Err(ScaffoldError::InvalidSdkPath(..))));
+}
+
+#[test]
+fn test_vendored_manifest_dep_sets_match_real_crates() {
+    use cargo_goaria_pack::scaffold::sdk_assets::{
+        VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
+    };
+
+    let root: toml::Value = toml::from_str(&read(&workspace_root().join("Cargo.toml"))).unwrap();
+    let ws_pkg = &root["workspace"]["package"];
+    let ws_deps = &root["workspace"]["dependencies"];
+
+    let check = |crate_dir: &str, template: &str| {
+        let real: toml::Value = toml::from_str(&read(
+            &workspace_root()
+                .join("crates")
+                .join(crate_dir)
+                .join("Cargo.toml"),
+        ))
+        .unwrap();
+        let vendored: toml::Value =
+            toml::from_str(&template.replace("{version}", ws_pkg["version"].as_str().unwrap()))
+                .unwrap();
+        let vendored_deps = vendored["dependencies"].as_table().unwrap();
+
+        // Edition tracks the workspace package edition.
+        assert_eq!(
+            vendored["package"]["edition"].as_str().unwrap(),
+            ws_pkg["edition"].as_str().unwrap(),
+            "{crate_dir}: edition drift"
+        );
+
+        for (dep, real_spec) in real["dependencies"].as_table().unwrap() {
+            let vendored_spec = vendored_deps
+                .get(dep.as_str())
+                .unwrap_or_else(|| panic!("{crate_dir}: dep {dep} missing from vendored manifest"));
+            // Resolve workspace-inherited deps against the root table.
+            let resolved = if real_spec.get("workspace").and_then(|w| w.as_bool()) == Some(true) {
+                ws_deps.get(dep.as_str()).unwrap_or_else(|| {
+                    panic!("{crate_dir}: {dep} missing from workspace dependencies")
+                })
+            } else {
+                real_spec
+            };
+            for key in ["version", "default-features", "features"] {
+                let expected = resolved.get(key);
+                let actual = vendored_spec.get(key);
+                match expected {
+                    Some(exp) => assert_eq!(
+                        actual.expect("missing key"),
+                        exp,
+                        "{crate_dir}: dep {dep} key {key} drift"
+                    ),
+                    None => assert!(
+                        actual.is_none(),
+                        "{crate_dir}: dep {dep} unexpectedly sets {key}"
+                    ),
+                }
+            }
+        }
+        let real_deps = real["dependencies"].as_table().unwrap();
+        for dep in vendored_deps.keys() {
+            assert!(
+                real_deps.contains_key(dep),
+                "{crate_dir}: vendored manifest carries extra dep {dep}"
+            );
+        }
+    };
+
+    check("goaria-extractor-sdk", VENDORED_SDK_CARGO_TOML);
+    check("goaria-extractor-macro", VENDORED_MACRO_CARGO_TOML);
 }

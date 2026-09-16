@@ -88,6 +88,9 @@ crate-type = ["cdylib", "rlib"]
 {sdk_dep}
 serde = {{ version = "1.0", default-features = false, features = ["derive", "alloc"] }}
 serde_json = {{ version = "1.0", default-features = false, features = ["alloc"] }}
+
+# Empty table detaches the pack from any enclosing cargo workspace.
+[workspace]
 "#
     );
     std::fs::write(target_dir.join("Cargo.toml"), cargo_toml)?;
