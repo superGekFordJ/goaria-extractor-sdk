@@ -427,6 +427,7 @@ A compiled extractor distribution archive (`.pack.zip`) MUST adhere to determini
 - Digital signatures use standard Ed25519 (RFC 8032).
 - The signature is calculated over the exact bytes of `manifest.json`.
 - `manifest.json` contains `payload_sha256`, cryptographically binding the manifest to the WASM payload.
+- The signer public key is part of the pack's verified identity (`public_key_sha256`); the host binds authentication and profile state to it. Pack updates MUST be signed with the same key to be treated as the same publisher — a key change yields a new identity and orphans previously granted authentication state. Lock v1 admits exactly one `public_keys` entry per pack.
 
 ### 7.3 Companion Lock File (`.lock.json`)
 The packaging tool outputs a companion lock file matching schema version `1`:

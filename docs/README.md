@@ -311,6 +311,10 @@ cargo goaria-pack keygen \
   --out-pub ~/.goaria/keys/key.pub
 ```
 
+**Signer continuity**: the Ed25519 public key is part of the pack's verified identity — the host records `public_key_sha256` alongside the pack ID and binds authentication/profile state to it. Sign every release of a pack with the **same key** so updates are recognized as the same publisher; signing with a different key produces a new identity and drops previously granted auth sessions. Back up the seed file — `keygen` never overwrites, and a lost seed cannot be recovered.
+
+Note that `pack` without `--sign-key` falls back to a fresh **ephemeral** key each run, which never forms a stable identity. Always pass `--sign-key` for anything you intend to install or update.
+
 ### 6.2 Deterministic Pack Generation
 ```bash
 cargo goaria-pack pack \

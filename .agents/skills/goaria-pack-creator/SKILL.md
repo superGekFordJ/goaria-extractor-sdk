@@ -167,6 +167,8 @@ cargo goaria-pack pack [OPTIONS]
    - `manifest.sig` (64-byte Ed25519 signature over `manifest.json`)
 2. `<pack_id>.lock.json` — Supply-chain lockfile containing cryptographic SHA-256 hashes of all components.
 
+> **Signer continuity**: the Ed25519 public key is part of the pack's verified identity — the host records `public_key_sha256` and binds auth/profile state to it. Sign every release of a pack with the **same key** so updates stay the same publisher; a different key is a new identity and orphans granted auth sessions. `pack` without `--sign-key` uses a fresh ephemeral key per run, which never forms a stable identity — always pass `--sign-key` for packs meant to be installed or updated.
+
 ---
 
 ## 2. System Architecture & Execution Model
