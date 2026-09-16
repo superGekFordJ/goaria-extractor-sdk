@@ -21,7 +21,7 @@ pub const HeaderMap = std.json.ArrayHashMap([]const []const u8);
 
 /// Input payload passed to `goaria_match`.
 pub const MatchInput = struct {
-    /// Candidate URL the host asks the pack to evaluate.
+    /// Host-validated http(s) URL under evaluation.
     url: []const u8,
 };
 
@@ -34,8 +34,8 @@ pub const MatchOutput = struct {
     /// decodes as `0`. Emitting `100` for a confident match is an SDK
     /// convention, not a wire default.
     confidence: ?u8 = null,
-    /// Optional human-readable explanation. The host rejects reasons longer
-    /// than 512 bytes or containing control characters.
+    /// Optional explanation; the host rejects values longer than 512 bytes
+    /// or containing control characters.
     reason: ?[]const u8 = null,
 
     /// Confident match result (`matched: true`, `confidence: 100` — an SDK
@@ -74,7 +74,7 @@ pub const MatchOutput = struct {
 
 /// Input payload passed to `goaria_extract`.
 pub const ExtractInput = struct {
-    /// URL the host asks the pack to extract downloadable items from.
+    /// Host-validated http(s) URL to extract downloadable items from.
     url: []const u8,
 };
 
@@ -87,15 +87,12 @@ pub const ExtractInput = struct {
 /// bytes, values at most 512 bytes, no credential-shaped key names such as
 /// `authorization`, `cookie`, `token`, or `api_key`).
 pub const ExtractedItemRef = struct {
-    /// Optional pack-assigned identifier for the item.
     id: ?[]const u8 = null,
     /// Direct downloadable URL (http/https only).
     url: ?[]const u8 = null,
-    /// Suggested destination filename.
     filename: ?[]const u8 = null,
     /// Known artifact size in bytes; the host rejects negative values.
     size_bytes: ?i64 = null,
-    /// Content MIME type.
     mime_type: ?[]const u8 = null,
     /// Opaque reference to an authentication profile held in host custody;
     /// the host injects the credential when running the download. Mutually
@@ -124,13 +121,11 @@ pub const ExtractedItemRef = struct {
 pub const ExtractOutput = struct {
     items: []const ExtractedItemRef,
 
-    /// Empty extraction result.
     pub fn empty() ExtractOutput {
         return .{ .items = &.{} };
     }
 
-    /// Extraction result containing exactly one item; the returned slice is
-    /// allocated from `allocator`.
+    /// The `items` slice is allocated from `allocator`.
     pub fn single(allocator: std.mem.Allocator, item: ExtractedItemRef) !ExtractOutput {
         const slice = try allocator.alloc(ExtractedItemRef, 1);
         slice[0] = item;
@@ -142,7 +137,6 @@ pub const ExtractOutput = struct {
 pub const AuthSecretKind = enum {
     /// Bearer-token credential materialized as `Authorization: Bearer <token>`.
     bearer,
-    /// Cookie-based credential.
     cookie,
 };
 
@@ -200,7 +194,6 @@ pub const HostHTTPFetchRequest = struct {
 pub const HostHTTPFetchResponse = struct {
     /// Whether the HTTP call succeeded and was permitted by policy.
     ok: bool,
-    /// HTTP status code (e.g. `200`, `404`).
     status_code: ?i32 = null,
     /// URL after redirects; secret-shaped values are redacted by the host.
     final_url: ?[]const u8 = null,
@@ -208,7 +201,6 @@ pub const HostHTTPFetchResponse = struct {
     /// (`Content-Length`, `Content-Type`, `Etag`, `Last-Modified`) under
     /// canonical `Title-Case` names with secret-shaped values redacted.
     headers: ?HeaderMap = null,
-    /// Base64-encoded response payload bytes.
     body_base64: ?[]const u8 = null,
     /// Stable machine-readable error code when `ok` is `false`.
     ///
@@ -228,7 +220,8 @@ pub const HostHTTPFetchResponse = struct {
 /// raw mode or `broker_policy_ref` + `endpoint_ref` (+ `params`) for ref
 /// mode.
 pub const HostAuthProfileStatusRequest = struct {
-    /// Opaque host authentication profile reference to query.
+    /// Opaque host-custody profile identifier — the credential itself never
+    /// crosses the ABI.
     auth_profile_ref: []const u8,
     /// Raw-mode URL the profile would be used for.
     url: ?[]const u8 = null,
@@ -242,7 +235,8 @@ pub const HostAuthProfileStatusRequest = struct {
 
 /// Response payload received from host import `goaria_host.auth_profile_status`.
 pub const HostAuthProfileStatusResponse = struct {
-    /// Whether status resolution succeeded.
+    /// Whether the status lookup itself succeeded — distinct from
+    /// `available`, which reports whether credentials exist.
     ok: bool,
     /// Whether credentials exist in host custody for the profile.
     available: ?bool = null,
@@ -273,7 +267,6 @@ pub const HostRegisterDownloadAuthRequest = struct {
 
 /// Response payload received from `goaria_host.register_download_auth`.
 pub const HostRegisterDownloadAuthResponse = struct {
-    /// Whether registration succeeded.
     ok: bool,
     /// Opaque `dar-` + 32 lowercase hex reference bound to the registering
     /// pack identity and the current invocation.
@@ -295,7 +288,6 @@ pub const HostTimeRequest = struct {};
 
 /// Response payload received from `goaria_host.host_time`.
 pub const HostTimeResponse = struct {
-    /// Whether the call succeeded.
     ok: bool,
     /// Unix timestamp (seconds) frozen for the duration of one invocation;
     /// repeated calls inside the same `goaria_extract` return the same value.

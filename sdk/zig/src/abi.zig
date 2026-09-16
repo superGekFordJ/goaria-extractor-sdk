@@ -30,8 +30,8 @@ pub const Unpacked = struct {
     len: u32,
 };
 
-/// Pack pointer and length into a single 64-bit unsigned integer.
-/// High 32 bits = pointer, Low 32 bits = length.
+/// ABI return-value packing: high 32 bits = guest-memory pointer, low 32
+/// bits = buffer length. A `0` result signals failure or an empty payload.
 pub inline fn packResult(ptr: u32, len: u32) u64 {
     return (@as(u64, ptr) << 32) | @as(u64, len);
 }
@@ -44,9 +44,8 @@ pub inline fn unpackResult(val: u64) Unpacked {
     };
 }
 
-/// Obtain the appropriate allocator for the current execution context.
-/// In WASM mode, returns `std.heap.wasm_allocator`.
-/// In native test mode, returns `std.heap.page_allocator`.
+/// Returns `std.heap.wasm_allocator` on wasm32, `std.heap.page_allocator`
+/// on native (test) targets.
 pub fn getAllocator() std.mem.Allocator {
     if (builtin.target.cpu.arch.isWasm()) {
         return std.heap.wasm_allocator;
@@ -101,7 +100,6 @@ pub fn packJsonResponse(allocator: std.mem.Allocator, value: anytype) i64 {
 pub const GuestBuffer = struct {
     /// Guest-memory pointer to the buffer start.
     ptr: i32,
-    /// Buffer length in bytes.
     len: i32,
 
     /// Take ownership of a raw pointer/length pair; returns `null` for null
@@ -112,7 +110,6 @@ pub const GuestBuffer = struct {
         return .{ .ptr = ptr, .len = len };
     }
 
-    /// View the buffer contents as a byte slice.
     pub fn slice(self: GuestBuffer) []const u8 {
         if (self.ptr <= 0 or self.len <= 0) return &.{};
         const u_ptr: usize = @as(usize, @as(u32, @bitCast(self.ptr)));

@@ -69,8 +69,6 @@ pub fn build_post_body_request(
     }
 }
 
-/// High-level client API for calling GoAria host services.
-///
 /// Stateless: every method serializes a request DTO, invokes the matching
 /// `goaria_host` import, and decodes the response. Each call consumes one
 /// unit of the manifest `resource_limits.max_host_calls` budget; exhausting
@@ -79,13 +77,10 @@ pub fn build_post_body_request(
 pub struct HostBroker;
 
 impl HostBroker {
-    /// Create a stateless host broker client.
     pub fn new() -> Self {
         Self
     }
 
-    /// Execute an HTTP fetch request via the host broker.
-    ///
     /// Requires `cap.http.fetch`; the extended features on
     /// [`HostHTTPFetchRequest`] additionally require `cap.http.fetch.extended`.
     ///
@@ -171,8 +166,6 @@ impl HostBroker {
         })
     }
 
-    /// Fetch and decode the response body as raw bytes.
-    ///
     /// # Errors
     /// Returns [`ExtractorError`] under the same conditions as [`Self::fetch`],
     /// or [`ExtractorError::Base64Decode`] when `body_base64` is not valid
@@ -184,8 +177,6 @@ impl HostBroker {
         Ok(bytes)
     }
 
-    /// Fetch and decode the response body as a UTF-8 string.
-    ///
     /// # Errors
     /// Returns [`ExtractorError`] under the same conditions as
     /// [`Self::fetch_bytes`], or [`ExtractorError::ExecutionFailed`] when the
@@ -196,8 +187,6 @@ impl HostBroker {
             .map_err(|e| ExtractorError::ExecutionFailed(format!("invalid utf-8 body: {}", e)))
     }
 
-    /// Fetch and deserialize a JSON body into `T`.
-    ///
     /// # Errors
     /// Returns [`ExtractorError`] under the same conditions as
     /// [`Self::fetch_bytes`], or [`ExtractorError::Serialization`] when the
@@ -210,8 +199,6 @@ impl HostBroker {
         serde_json::from_slice(&bytes).map_err(ExtractorError::from)
     }
 
-    /// Query the availability and metadata of an authentication profile.
-    ///
     /// Requires `cap.auth.profile`. Unlike the fetch helpers this returns the
     /// raw response: a profile lookup miss or host denial arrives as
     /// `ok: false` *inside* the payload (see

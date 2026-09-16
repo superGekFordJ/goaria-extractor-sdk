@@ -12,11 +12,9 @@ pub mod abi;
 pub mod alloc;
 /// High-level [`HostBroker`] client for the `goaria_host` imports.
 pub mod broker;
-/// Error type shared across SDK operations.
 pub mod error;
 /// Low-level wrappers over the `goaria_host` Wasm imports.
 pub mod host;
-/// Commonly used types and macros re-exported in one place.
 pub mod prelude;
 /// The [`Extractor`] trait packs implement.
 pub mod traits;

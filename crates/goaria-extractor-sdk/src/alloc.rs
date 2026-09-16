@@ -22,8 +22,6 @@ static MOCK_HEAP: Mutex<Option<HashMap<i32, MockAllocEntry>>> = Mutex::new(None)
 #[cfg(not(target_arch = "wasm32"))]
 static NEXT_HANDLE: AtomicI32 = AtomicI32::new(1);
 
-/// Convert a guest memory handle/pointer `i32` into a raw pointer `*mut u8`.
-///
 /// On `wasm32` the value is a linear-memory offset cast directly to a
 /// pointer. On native targets it is a handle into the SDK's mock heap used
 /// by tests; unknown handles yield null.
@@ -208,17 +206,14 @@ impl GuestBuffer {
         self.ptr
     }
 
-    /// Buffer length in bytes.
     pub fn len(&self) -> i32 {
         self.len
     }
 
-    /// Whether the buffer holds zero bytes.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// View the buffer contents as a byte slice.
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             let raw = ptr_to_raw(self.ptr);
@@ -230,10 +225,6 @@ impl GuestBuffer {
         }
     }
 
-    /// View the buffer contents as UTF-8 text.
-    ///
-    /// # Errors
-    /// Returns [`Utf8Error`] if the buffer is not valid UTF-8.
     pub fn as_str(&self) -> Result<&str, Utf8Error> {
         std::str::from_utf8(self.as_slice())
     }

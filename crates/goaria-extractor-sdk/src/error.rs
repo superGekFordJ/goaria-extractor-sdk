@@ -1,7 +1,5 @@
 use std::fmt;
 
-/// Standard error type for GoAria extractor operations.
-///
 /// How a returned `Err` reaches the host depends on the entrypoint: see
 /// [`Extractor`](crate::traits::Extractor) for the wire mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,17 +18,11 @@ pub enum ExtractorError {
         /// Stable machine-readable error code — the host's wire `error_code`
         /// or an SDK-minted transport code.
         error_code: String,
-        /// Human-readable detail from the host response.
         message: String,
     },
     /// The brokered fetch was permitted and executed but the remote server
     /// returned HTTP status >= 400.
-    HttpError {
-        /// HTTP status code returned by the remote server.
-        status_code: i32,
-        /// Human-readable detail.
-        message: String,
-    },
+    HttpError { status_code: i32, message: String },
     /// Caller-supplied input failed validation. Not produced by SDK
     /// internals; available for extractor implementations validating their
     /// own inputs.

@@ -138,8 +138,6 @@ pub const HostBroker = struct {
         return abi.GuestBuffer.fromRaw(@intCast(unpacked.ptr), @intCast(unpacked.len)) orelse Error.InvalidResponseBuffer;
     }
 
-    /// Execute an HTTP fetch request via the host broker.
-    ///
     /// Requires `cap.http.fetch`; extended features on the request
     /// additionally require `cap.http.fetch.extended`. This is the raw level:
     /// an `ok: false` payload is *not* an error — inspect `error_code` on the
@@ -215,8 +213,6 @@ pub const HostBroker = struct {
         return fetch(allocator, buildRefRequest(broker_policy_ref, endpoint_ref, params));
     }
 
-    /// Fetch and decode the response `body_base64` as raw bytes.
-    ///
     /// Unlike `fetch`, an `ok: false` payload maps to `HttpError` here.
     /// Caller owns the returned slice; a missing or empty body yields an
     /// empty slice. `Base64DecodeError` when the payload is not valid base64.
@@ -242,8 +238,8 @@ pub const HostBroker = struct {
         return out_buf;
     }
 
-    /// Fetch and decode the response body as a UTF-8 string (alias of
-    /// `fetchBytes`; no separate validation is performed).
+    /// Alias of `fetchBytes`; no separate UTF-8 validation is performed on
+    /// the returned bytes.
     pub fn fetchText(
         allocator: std.mem.Allocator,
         req: types.HostHTTPFetchRequest,
@@ -251,8 +247,6 @@ pub const HostBroker = struct {
         return fetchBytes(allocator, req);
     }
 
-    /// Query authentication profile status from the host.
-    ///
     /// Requires `cap.auth.profile`. Like `fetch`, an `ok: false` payload is
     /// *not* an error — a profile lookup miss or host denial arrives in-band
     /// (`error_code`: `invalid_request`, `policy_denied`,
@@ -281,9 +275,8 @@ pub const HostBroker = struct {
         ) catch Error.JsonParseError;
     }
 
-    /// Convenience check for whether an auth profile is available for a
-    /// raw-mode URL. Returns `false` both when the profile holds no
-    /// credentials and when the status call itself resolved to `ok: false` —
+    /// Returns `false` both when the profile holds no credentials for the
+    /// raw-mode URL and when the status call itself resolved to `ok: false` —
     /// use `authProfileStatus` to distinguish those cases.
     pub fn isAuthAvailable(
         allocator: std.mem.Allocator,
@@ -299,8 +292,7 @@ pub const HostBroker = struct {
         return parsed.value.ok and (parsed.value.available orelse false);
     }
 
-    /// Register a pack-minted bearer token with the host download-auth
-    /// channel. Requires `cap.download.auth`.
+    /// Requires `cap.download.auth`.
     ///
     /// `token` is the raw credential: 1–8170 bytes of valid UTF-8 without
     /// CR/LF, and it must not already carry a `Bearer ` scheme prefix. After

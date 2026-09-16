@@ -18,7 +18,7 @@ pub const CAPABILITY_DOWNLOAD_AUTH: &str = "cap.download.auth";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MatchInput {
-    /// Candidate URL the host asks the pack to evaluate.
+    /// Host-validated http(s) URL under evaluation.
     pub url: String,
 }
 
@@ -36,9 +36,9 @@ pub struct MatchOutput {
     /// does) is an SDK convention, not part of the ABI contract.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confidence: Option<u8>,
-    /// Optional human-readable explanation. The host rejects reasons longer
-    /// than 512 bytes or containing control characters. The SDK dispatcher
-    /// also uses this field to surface the text of a `match_url` `Err`.
+    /// Optional explanation; the host rejects values longer than 512 bytes
+    /// or containing control characters. The SDK dispatcher also uses this
+    /// field to surface the text of a `match_url` `Err`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -83,7 +83,7 @@ impl MatchOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractInput {
-    /// URL the host asks the pack to extract downloadable items from.
+    /// Host-validated http(s) URL to extract downloadable items from.
     pub url: String,
 }
 
@@ -100,17 +100,14 @@ pub struct ExtractOutput {
 }
 
 impl ExtractOutput {
-    /// Empty extraction result.
     pub fn new() -> Self {
         Self { items: Vec::new() }
     }
 
-    /// Extraction result containing exactly one item.
     pub fn single(item: ExtractedItemRef) -> Self {
         Self { items: vec![item] }
     }
 
-    /// Append an item to the output.
     pub fn with_item(mut self, item: ExtractedItemRef) -> Self {
         self.items.push(item);
         self
@@ -128,19 +125,16 @@ impl ExtractOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct ExtractedItemRef {
-    /// Optional pack-assigned identifier for the item.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Direct downloadable URL (http/https only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Suggested destination filename.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     /// Known artifact size in bytes; the host rejects negative values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<i64>,
-    /// Content MIME type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     /// Opaque reference to an authentication profile held in host custody;
@@ -173,7 +167,6 @@ pub struct ExtractedItemRef {
 pub enum AuthSecretKind {
     /// Bearer-token credential materialized as `Authorization: Bearer <token>`.
     Bearer,
-    /// Cookie-based credential.
     Cookie,
     /// Unrecognized kind from a newer host; treated as opaque.
     #[serde(other)]
@@ -253,7 +246,6 @@ pub struct HostHTTPFetchRequest {
 pub struct HostHTTPFetchResponse {
     /// Whether the HTTP call succeeded and was permitted by policy.
     pub ok: bool,
-    /// HTTP status code (e.g. `200`, `404`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_code: Option<i32>,
     /// URL after redirects; secret-shaped values are redacted by the host.
@@ -264,7 +256,6 @@ pub struct HostHTTPFetchResponse {
     /// canonical `Title-Case` names with secret-shaped values redacted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<BTreeMap<String, Vec<String>>>,
-    /// Base64-encoded response payload bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub body_base64: Option<String>,
     /// Stable machine-readable error code when `ok` is `false`.
@@ -289,7 +280,8 @@ pub struct HostHTTPFetchResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct HostAuthProfileStatusRequest {
-    /// Opaque host authentication profile reference to query.
+    /// Opaque host-custody profile identifier — the credential itself never
+    /// crosses the ABI.
     pub auth_profile_ref: String,
     /// Raw-mode URL the profile would be used for.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -310,7 +302,8 @@ pub struct HostAuthProfileStatusRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HostAuthProfileStatusResponse {
-    /// Whether status resolution succeeded.
+    /// Whether the status lookup itself succeeded — distinct from
+    /// `available`, which reports whether credentials exist.
     pub ok: bool,
     /// Whether credentials exist in host custody for the profile.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -354,7 +347,6 @@ pub struct HostRegisterDownloadAuthRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HostRegisterDownloadAuthResponse {
-    /// Whether registration succeeded.
     pub ok: bool,
     /// Opaque `dar-` + 32 lowercase hex reference bound to the registering
     /// pack identity and the current invocation.
@@ -384,7 +376,6 @@ pub struct HostTimeRequest {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct HostTimeResponse {
-    /// Whether the call succeeded.
     pub ok: bool,
     /// Unix timestamp (seconds) frozen for the duration of one invocation;
     /// repeated calls inside the same `goaria_extract` return the same value.
