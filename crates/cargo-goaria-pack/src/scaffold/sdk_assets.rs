@@ -97,6 +97,15 @@ pub const LICENSE_FILES: &[EmbeddedFile] = &[
     },
 ];
 
+// Pack-authoring skill dropped into every generated project root so agent
+// tooling auto-discovers the pack creation guide. Lives outside the
+// source-tree tables above for the same reason as LICENSE_FILES: the file
+// sits in the repo-root .agents/ tree, not inside a vendored source dir.
+pub const PROJECT_SKILL_FILES: &[EmbeddedFile] = &[EmbeddedFile {
+    rel_path: ".agents/skills/goaria-pack-creator/SKILL.md",
+    contents: include_str!("../../../../.agents/skills/goaria-pack-creator/SKILL.md"),
+}];
+
 pub const VENDORED_SDK_CARGO_TOML: &str = r#"[package]
 name = "goaria-extractor-sdk"
 version = "{version}"

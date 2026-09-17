@@ -188,6 +188,61 @@ fn test_zig_vendor_scaffolds_goaria_sdk() {
 }
 
 #[test]
+fn test_generated_projects_embed_pack_creator_skill() {
+    const SKILL_PATH: &str = ".agents/skills/goaria-pack-creator/SKILL.md";
+    let expected = read(&workspace_root().join(SKILL_PATH));
+    let temp = tempfile::tempdir().unwrap();
+
+    // Rust: the skill lands at the project root for every SDK dependency mode.
+    for (name, spec) in [
+        ("rust-vendor-pack", SdkSpec::Vendor),
+        ("rust-git-pack", SdkSpec::Git { git_ref: None }),
+        ("rust-crates-pack", SdkSpec::Crates),
+        (
+            "rust-path-pack",
+            SdkSpec::Path(
+                workspace_root()
+                    .join("crates")
+                    .join("goaria-extractor-sdk")
+                    .canonicalize()
+                    .unwrap(),
+            ),
+        ),
+    ] {
+        let dir = temp.path().join(name.replace('-', "_"));
+        scaffold_project(name, Language::Rust, &dir, &spec).unwrap();
+        assert_eq!(
+            read(&dir.join(SKILL_PATH)),
+            expected,
+            "{name}: {SKILL_PATH} missing or drifted"
+        );
+    }
+
+    // Zig: vendored and --sdk-path scaffolds both land the skill.
+    for (name, spec) in [
+        ("zig-vendor-pack", SdkSpec::Vendor),
+        (
+            "zig-path-pack",
+            SdkSpec::Path(
+                workspace_root()
+                    .join("sdk")
+                    .join("zig")
+                    .canonicalize()
+                    .unwrap(),
+            ),
+        ),
+    ] {
+        let dir = temp.path().join(name.replace('-', "_"));
+        scaffold_project(name, Language::Zig, &dir, &spec).unwrap();
+        assert_eq!(
+            read(&dir.join(SKILL_PATH)),
+            expected,
+            "{name}: {SKILL_PATH} missing or drifted"
+        );
+    }
+}
+
+#[test]
 fn test_zig_fingerprint_matches_zon_name() {
     let temp = tempfile::tempdir().unwrap();
     let project_dir = temp.path().join("fp_pack");

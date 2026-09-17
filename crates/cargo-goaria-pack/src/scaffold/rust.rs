@@ -1,8 +1,8 @@
 use crate::scaffold::sdk_assets::{
-    EmbeddedFile, EMBEDDED_SDK_VERSION, LICENSE_FILES, RUST_MACRO_FILES, RUST_SDK_FILES,
-    SDK_GIT_URL, VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
+    EMBEDDED_SDK_VERSION, LICENSE_FILES, RUST_MACRO_FILES, RUST_SDK_FILES, SDK_GIT_URL,
+    VENDORED_MACRO_CARGO_TOML, VENDORED_SDK_CARGO_TOML,
 };
-use crate::scaffold::{ScaffoldError, SdkSpec};
+use crate::scaffold::{write_embedded_tree, ScaffoldError, SdkSpec};
 use std::path::Path;
 
 fn sdk_dependency_line(sdk: &SdkSpec) -> Result<String, ScaffoldError> {
@@ -24,17 +24,6 @@ fn sdk_dependency_line(sdk: &SdkSpec) -> Result<String, ScaffoldError> {
             Ok(format!("goaria-extractor-sdk = {{ path = \"{path}\" }}"))
         }
     }
-}
-
-fn write_embedded_tree(root: &Path, files: &[EmbeddedFile]) -> Result<(), ScaffoldError> {
-    for file in files {
-        let dest = root.join(file.rel_path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&dest, file.contents)?;
-    }
-    Ok(())
 }
 
 fn write_vendored_sdk(target_dir: &Path) -> Result<(), ScaffoldError> {

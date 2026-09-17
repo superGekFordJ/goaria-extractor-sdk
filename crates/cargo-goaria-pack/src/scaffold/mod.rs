@@ -3,6 +3,7 @@ pub mod sdk_assets;
 pub mod zig;
 
 use crate::cli::{Language, SdkSource};
+use crate::scaffold::sdk_assets::{EmbeddedFile, PROJECT_SKILL_FILES};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -234,6 +235,20 @@ fn canonical_loose(path: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn write_embedded_tree(
+    root: &Path,
+    files: &[EmbeddedFile],
+) -> Result<(), ScaffoldError> {
+    for file in files {
+        let dest = root.join(file.rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, file.contents)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), ScaffoldError> {
     const SKIP_DIRS: &[&str] = &[".zig-cache", "zig-out", ".git", "target"];
     let canon_src = canonical_loose(src);
@@ -302,7 +317,8 @@ pub fn scaffold_project(
     let result = match lang {
         Language::Rust => rust::generate(name, target_dir, sdk),
         Language::Zig => zig::generate(name, target_dir, sdk),
-    };
+    }
+    .and_then(|_| write_embedded_tree(target_dir, PROJECT_SKILL_FILES));
 
     if result.is_err() && created {
         let _ = std::fs::remove_dir_all(target_dir);
