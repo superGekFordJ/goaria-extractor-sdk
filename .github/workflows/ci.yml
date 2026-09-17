@@ -28,8 +28,11 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      # Direct official download: zig 0.16.0 switched tarball naming to
-      # zig-<arch>-<os>-<ver>, which setup-zig/community mirrors 404 on.
+      # zig 0.16.0 renamed tarballs to zig-<arch>-<os>-<ver>, which
+      # setup-zig's mirror probing still requests under the old
+      # zig-<os>-<arch>-<ver> name and 404s everywhere. Try community
+      # mirrors first (ziglang.org's origin stalls on GH runners);
+      # the pinned sha256 below makes mirror trust irrelevant.
       - name: Install Zig (Linux/macOS)
         if: runner.os != 'Windows'
         shell: bash
@@ -42,7 +45,19 @@ jobs:
                    sha="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
                    sum() { shasum -a 256 -c; } ;;
           esac
-          curl -fsSL "https://ziglang.org/download/0.16.0/$pkg.tar.xz" -o zig.tar.xz
+          ok=0
+          for base in \
+            "https://zig.linus.dev/zig" \
+            "https://pkg.machengine.org/zig" \
+            "https://zig.squirl.dev" \
+            "https://ziglang.org/download"; do
+            echo "Trying $base"
+            if curl -fsSL --connect-timeout 10 --max-time 240 --retry 2 --retry-all-errors \
+                 "$base/0.16.0/$pkg.tar.xz" -o zig.tar.xz; then
+              ok=1; break
+            fi
+          done
+          [ "$ok" = 1 ] || { echo "::error::all zig mirrors failed"; exit 1; }
           echo "$sha  zig.tar.xz" | sum
           sudo mkdir -p /opt/zig
           sudo tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
@@ -54,7 +69,19 @@ jobs:
         shell: pwsh
         run: |
           $pkg = "zig-x86_64-windows-0.16.0"
-          curl -fsSL "https://ziglang.org/download/0.16.0/$pkg.zip" -OutFile zig.zip
+          $ok = $false
+          foreach ($base in @(
+            "https://zig.linus.dev/zig",
+            "https://pkg.machengine.org/zig",
+            "https://zig.squirl.dev",
+            "https://ziglang.org/download"
+          )) {
+            Write-Host "Trying $base"
+            curl.exe -fsSL --connect-timeout 10 --max-time 240 --retry 2 --retry-all-errors `
+              "$base/0.16.0/$pkg.zip" -o zig.zip
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+          }
+          if (-not $ok) { throw "all zig mirrors failed" }
           $sha = (Get-FileHash zig.zip -Algorithm SHA256).Hash.ToLower()
           if ($sha -ne "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e") {
             throw "zig tarball sha256 mismatch: $sha"
