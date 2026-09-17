@@ -111,13 +111,9 @@ impl Extractor for ImgurExtractor {
 
 fn parse_imgur_content_id(raw_url: &str) -> Option<String> {
     let trimmed = raw_url.trim();
-    let url_without_scheme = if let Some(stripped) = trimmed.strip_prefix("https://") {
-        stripped
-    } else if let Some(stripped) = trimmed.strip_prefix("http://") {
-        stripped
-    } else {
-        return None;
-    };
+    let url_without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))?;
 
     let (host_and_path, _query_or_frag) = url_without_scheme
         .split_once('?')
