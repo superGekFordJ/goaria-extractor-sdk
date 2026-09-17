@@ -131,7 +131,10 @@ fn parse_imgur_content_id(raw_url: &str) -> Option<String> {
     };
 
     let host_no_port = host.split(':').next().unwrap_or("");
-    if host_no_port != "imgur.com" && host_no_port != "i.imgur.com" && !host_no_port.ends_with(".imgur.com") {
+    if host_no_port != "imgur.com"
+        && host_no_port != "i.imgur.com"
+        && !host_no_port.ends_with(".imgur.com")
+    {
         return None;
     }
 
@@ -158,7 +161,10 @@ fn parse_imgur_content_id(raw_url: &str) -> Option<String> {
         id_without_ext
     };
 
-    if !real_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !real_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
 
@@ -235,7 +241,10 @@ fn find_meta_property_content(body: &str, property_name: &str) -> Option<String>
         while let Some(pos) = body[search_from..].find(pat) {
             let start = search_from + pos;
             let tag_start = body[..start].rfind('<').unwrap_or(start);
-            let tag_end = body[start..].find('>').map(|e| start + e).unwrap_or(body.len());
+            let tag_end = body[start..]
+                .find('>')
+                .map(|e| start + e)
+                .unwrap_or(body.len());
             let tag = &body[tag_start..tag_end];
 
             if let Some(content) = extract_attr_from_tag(tag, "content") {
@@ -260,7 +269,10 @@ fn find_link_tag_href(body: &str, rel_value: &str) -> Option<String> {
         while let Some(pos) = body[search_from..].find(pat) {
             let start = search_from + pos;
             let tag_start = body[..start].rfind('<').unwrap_or(start);
-            let tag_end = body[start..].find('>').map(|e| start + e).unwrap_or(body.len());
+            let tag_end = body[start..]
+                .find('>')
+                .map(|e| start + e)
+                .unwrap_or(body.len());
             let tag = &body[tag_start..tag_end];
 
             if let Some(href) = extract_attr_from_tag(tag, "href") {
@@ -372,30 +384,60 @@ mod tests {
 
     #[test]
     fn test_parse_imgur_content_id() {
-        assert_eq!(parse_imgur_content_id("https://imgur.com/sample123"), Some("sample123".to_string()));
-        assert_eq!(parse_imgur_content_id("https://imgur.com/a/album456"), Some("album456".to_string()));
-        assert_eq!(parse_imgur_content_id("https://imgur.com/gallery/gallery789"), Some("gallery789".to_string()));
-        assert_eq!(parse_imgur_content_id("https://imgur.com/gallery/brb-off-to-bother-town-wizard-VFnCfiB"), Some("VFnCfiB".to_string()));
-        assert_eq!(parse_imgur_content_id("http://i.imgur.com/photo.png"), Some("photo".to_string()));
-        assert_eq!(parse_imgur_content_id("https://example.com/sample123"), None);
+        assert_eq!(
+            parse_imgur_content_id("https://imgur.com/sample123"),
+            Some("sample123".to_string())
+        );
+        assert_eq!(
+            parse_imgur_content_id("https://imgur.com/a/album456"),
+            Some("album456".to_string())
+        );
+        assert_eq!(
+            parse_imgur_content_id("https://imgur.com/gallery/gallery789"),
+            Some("gallery789".to_string())
+        );
+        assert_eq!(
+            parse_imgur_content_id(
+                "https://imgur.com/gallery/brb-off-to-bother-town-wizard-VFnCfiB"
+            ),
+            Some("VFnCfiB".to_string())
+        );
+        assert_eq!(
+            parse_imgur_content_id("http://i.imgur.com/photo.png"),
+            Some("photo".to_string())
+        );
+        assert_eq!(
+            parse_imgur_content_id("https://example.com/sample123"),
+            None
+        );
         assert_eq!(parse_imgur_content_id("invalid-url"), None);
     }
 
     #[test]
     fn test_find_direct_image_url_og() {
         let html = r#"<html><head><meta property="og:image" content="https://i.imgur.com/sample123.jpg?fbplay" /></head></html>"#;
-        assert_eq!(find_direct_image_url(html), Some("https://i.imgur.com/sample123.jpg".to_string()));
+        assert_eq!(
+            find_direct_image_url(html),
+            Some("https://i.imgur.com/sample123.jpg".to_string())
+        );
 
         let twitter_video_html = r#"<html><head><meta name="twitter:player:stream" content="https://i.imgur.com/DOuSYXf.mp4"></head></html>"#;
-        assert_eq!(find_direct_image_url(twitter_video_html), Some("https://i.imgur.com/DOuSYXf.mp4".to_string()));
+        assert_eq!(
+            find_direct_image_url(twitter_video_html),
+            Some("https://i.imgur.com/DOuSYXf.mp4".to_string())
+        );
     }
 
     #[test]
     fn test_is_valid_direct_imgur_url() {
         assert!(is_valid_direct_imgur_url("https://i.imgur.com/abc1234.jpg"));
-        assert!(is_valid_direct_imgur_url("https://i.imgur.com/abc1234.jpg?fbplay"));
+        assert!(is_valid_direct_imgur_url(
+            "https://i.imgur.com/abc1234.jpg?fbplay"
+        ));
         assert!(is_valid_direct_imgur_url("https://i.imgur.com/abc1234.mp4"));
         assert!(!is_valid_direct_imgur_url("https://evil.com/abc.jpg"));
-        assert!(!is_valid_direct_imgur_url("https://i.imgur.com/sub/abc.jpg"));
+        assert!(!is_valid_direct_imgur_url(
+            "https://i.imgur.com/sub/abc.jpg"
+        ));
     }
 }
