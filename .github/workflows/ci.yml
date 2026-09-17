@@ -28,10 +28,40 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.16.0
+      # Direct official download: zig 0.16.0 switched tarball naming to
+      # zig-<arch>-<os>-<ver>, which setup-zig/community mirrors 404 on.
+      - name: Install Zig (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux) pkg="zig-x86_64-linux-0.16.0"
+                   sha="70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00"
+                   sum() { sha256sum -c; } ;;
+            macOS) pkg="zig-aarch64-macos-0.16.0"
+                   sha="b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489"
+                   sum() { shasum -a 256 -c; } ;;
+          esac
+          curl -fsSL "https://ziglang.org/download/0.16.0/$pkg.tar.xz" -o zig.tar.xz
+          echo "$sha  zig.tar.xz" | sum
+          sudo mkdir -p /opt/zig
+          sudo tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
+          echo "/opt/zig" >> "$GITHUB_PATH"
+          zig version
+
+      - name: Install Zig (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pkg = "zig-x86_64-windows-0.16.0"
+          curl -fsSL "https://ziglang.org/download/0.16.0/$pkg.zip" -OutFile zig.zip
+          $sha = (Get-FileHash zig.zip -Algorithm SHA256).Hash.ToLower()
+          if ($sha -ne "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e") {
+            throw "zig tarball sha256 mismatch: $sha"
+          }
+          Expand-Archive zig.zip -DestinationPath C:\zig-dist
+          echo "C:\zig-dist\$pkg" >> $env:GITHUB_PATH
+          zig version
 
       - name: Check Rust formatting
         run: cargo fmt --check

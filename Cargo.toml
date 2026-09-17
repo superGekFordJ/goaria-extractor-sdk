@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/*",
+    "examples/imgur_pack",
     "examples/rust_fixture_pack",
 ]
 resolver = "2"

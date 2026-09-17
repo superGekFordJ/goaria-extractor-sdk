@@ -38,6 +38,7 @@ impl Extractor for ImgurExtractor {
                         mime_type: mime_type.map(|m| m.to_string()),
                         auth_profile_ref: None,
                         header_profile_ref: None,
+                        download_auth_ref: None,
                         metadata: None,
                     };
                     return Ok(ExtractOutput::single(item));
@@ -100,6 +101,7 @@ impl Extractor for ImgurExtractor {
             mime_type: Some(mime_type.to_string()),
             auth_profile_ref: None,
             header_profile_ref: None,
+            download_auth_ref: None,
             metadata: None,
         };
 
