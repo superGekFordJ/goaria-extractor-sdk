@@ -1,14 +1,13 @@
 {
   "pack_id": "xpk-imgur01",
-  "pack_version": "2026.1.0",
+  "pack_version": "2026.1.1",
   "abi_version": 1,
   "description": "GoAria extractor pack for Imgur (imgur.com)",
-  "domains": [],
-  "domain_policy_refs": [
-    "dpr-imgur01"
-  ],
-  "broker_policy_refs": [
-    "bpr-imgur01"
+  "domains": [
+    {
+      "host": "imgur.com",
+      "include_subdomains": true
+    }
   ],
   "capabilities": [
     "cap.parse.wasm",

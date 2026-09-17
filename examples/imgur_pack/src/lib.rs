@@ -1,8 +1,4 @@
 use goaria_extractor_sdk::prelude::*;
-use std::collections::BTreeMap;
-
-const IMGUR_BROKER_POLICY_REF: &str = "bpr-imgur01";
-const IMGUR_ENDPOINT_REF: &str = "ep-imgur01";
 
 #[goaria_extractor]
 #[derive(Default)]
@@ -47,16 +43,12 @@ impl Extractor for ImgurExtractor {
         }
 
         let broker = HostBroker::new();
-        let mut params = BTreeMap::new();
-        params.insert("id".to_string(), content_id.clone());
 
-        // Alias Ref-Mode: url must be None, host expands endpoint_ref template
+        // Concrete-domain mode: fetch the share page directly; the host
+        // constrains the request to manifest `domains`.
         let req = HostHTTPFetchRequest {
-            url: None,
+            url: Some(format!("https://imgur.com/{content_id}")),
             method: Some("GET".to_string()),
-            broker_policy_ref: Some(IMGUR_BROKER_POLICY_REF.to_string()),
-            endpoint_ref: Some(IMGUR_ENDPOINT_REF.to_string()),
-            params: Some(params),
             ..Default::default()
         };
 
