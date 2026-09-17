@@ -62,7 +62,7 @@ jobs:
           sudo mkdir -p /opt/zig
           sudo tar -xJf zig.tar.xz -C /opt/zig --strip-components=1
           echo "/opt/zig" >> "$GITHUB_PATH"
-          zig version
+          /opt/zig/zig version
 
       - name: Install Zig (Windows)
         if: runner.os == 'Windows'
@@ -88,7 +88,7 @@ jobs:
           }
           Expand-Archive zig.zip -DestinationPath C:\zig-dist
           echo "C:\zig-dist\$pkg" >> $env:GITHUB_PATH
-          zig version
+          & "C:\zig-dist\$pkg\zig.exe" version
 
       - name: Check Rust formatting
         run: cargo fmt --check
