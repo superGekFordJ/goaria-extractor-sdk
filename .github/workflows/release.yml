@@ -177,14 +177,18 @@ jobs:
         working-directory: dist
         run: sha256sum *.tar.gz *.zip *.json > SHA256SUMS.txt
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          args=()
-          case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease);; esac
-          gh release create "$GITHUB_REF_NAME" \
-            --title "cargo-goaria-pack $GITHUB_REF_NAME" \
-            --generate-notes \
-            "${args[@]}" \
-            dist/*
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber dist/*
+          else
+            args=()
+            case "$GITHUB_REF_NAME" in *-*) args+=(--prerelease);; esac
+            gh release create "$GITHUB_REF_NAME" \
+              --title "cargo-goaria-pack $GITHUB_REF_NAME" \
+              --generate-notes \
+              "${args[@]}" \
+              dist/*
+          fi
