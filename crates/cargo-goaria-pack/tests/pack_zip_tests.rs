@@ -64,7 +64,7 @@ fn test_deterministic_zip_structure_and_metadata() {
         assert_eq!(last_mod.minute(), 0);
         assert_eq!(last_mod.second(), 0);
         #[cfg(unix)]
-        assert_eq!(file.unix_mode(), Some(0o644));
+        assert_eq!(file.unix_mode().map(|m| m & 0o777), Some(0o644));
         let mut content = Vec::new();
         file.read_to_end(&mut content).unwrap();
         assert_eq!(content, manifest_bytes);
