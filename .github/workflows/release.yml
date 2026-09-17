@@ -162,6 +162,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      # gh release create resolves the repo from the git checkout.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
